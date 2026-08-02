@@ -1,0 +1,16 @@
+{
+	"name": "駅シム — 1面1線から新宿へ",
+	"short_name": "駅シム",
+	"description": "しょぼい無人駅を新宿級の巨大ターミナルまで育てる3D駅経営シミュレーション",
+	"lang": "ja",
+	"start_url": "./",
+	"scope": "./",
+	"display": "standalone",
+	"orientation": "any",
+	"background_color": "#0f1622",
+	"theme_color": "#0f1622",
+	"icons": [
+		{ "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+		{ "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+	]
+}

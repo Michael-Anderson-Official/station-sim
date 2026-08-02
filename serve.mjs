@@ -21,7 +21,10 @@ const MIME = {
 const DEV = process.argv.includes("--dev");
 
 const server = http.createServer((req, res) => {
-	if (DEV && req.method === "POST" && req.url === "/__shot") {
+	if (DEV && req.method === "POST" && req.url.startsWith("/__shot")) {
+		// ?name= で保存先を指定できる(英数字とハイフンの .png のみ)
+		const q = new URL(req.url, "http://x").searchParams.get("name");
+		const name = /^[\w-]+\.png$/.test(q ?? "") ? q : "shot.png";
 		const chunks = [];
 		let size = 0;
 		req.on("data", c => {
@@ -32,8 +35,8 @@ const server = http.createServer((req, res) => {
 		req.on("end", () => {
 			const body = Buffer.concat(chunks).toString("utf8");
 			const b64 = body.replace(/^data:image\/png;base64,/, "");
-			fs.writeFileSync(path.join(ROOT, "shot.png"), Buffer.from(b64, "base64"));
-			res.writeHead(200); res.end("ok");
+			fs.writeFileSync(path.join(ROOT, name), Buffer.from(b64, "base64"));
+			res.writeHead(200); res.end(name);
 		});
 		return;
 	}

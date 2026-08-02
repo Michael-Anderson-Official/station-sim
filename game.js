@@ -67,6 +67,7 @@ function defaultState() {
 		rep: 70,              // 評判 0-100
 		town: 1,              // 街の発展度(需要倍率)
 		cars: 2,              // ホーム有効長(両)
+		conc: false,          // 橋上駅舎(コンコース)を建てたか
 		nPlat: 1,             // ホーム面数
 		nTrack: 1,            // 線路本数
 		platW: 6,             // ホーム幅
@@ -114,13 +115,31 @@ function recalcGeometry() {
 	G.platZ1 = G.platLen / 2;
 	// 駅舎の大きさは駅の規模に合わせる。小駅に巨大な橋上駅舎が載らないように
 	G.concD = Math.max(20, Math.min(92, 12 + gateCount() * 0.9 + G.platLen * 0.10));
-	G.over = Math.min(G.concD * 0.55, Math.max(10, G.platLen * 0.32));
-	G.concZ0 = G.platZ1 - G.over;
+	if (S.conc) {
+		// 橋上駅舎: ホームの北端にまたがり、乗客は階段で上り下りする
+		G.entryY = CFG.CONC_Y;
+		G.over = Math.min(G.concD * 0.55, Math.max(10, G.platLen * 0.32));
+		G.concZ0 = G.platZ1 - G.over;
+	} else {
+		// 地平駅: ホームの先の地上に駅舎があり、そのまま歩いて入れる
+		G.entryY = 0;
+		G.over = 0;
+		G.concD = Math.max(16, Math.min(46, 12 + gateCount() * 1.4));
+		G.concZ0 = G.platZ1 + 6;
+	}
 	G.concZ1 = G.concZ0 + G.concD;
-	G.gateZ = G.concZ1 - Math.min(18, G.concD * 0.34);
+	G.gateZ = S.conc ? G.concZ1 - Math.min(18, G.concD * 0.34) : G.concZ0 + Math.min(9, G.concD * 0.42);
 	G.exitZ = G.concZ1 + 8;
-	G.concX0 = platX(0) - G.unitW / 2 - 7 - S.concW;
-	G.concX1 = platX(S.nPlat - 1) + G.unitW / 2 + 7 + S.concW;
+	if (S.conc) {
+		G.concX0 = platX(0) - G.unitW / 2 - 7 - S.concW;
+		G.concX1 = platX(S.nPlat - 1) + G.unitW / 2 + 7 + S.concW;
+	} else {
+		// 駅舎は線路をまたげないので、いちばん東の線路より外に建てる
+		let railE = -Infinity;
+		for (let t = 0; t < S.nTrack; t++) railE = Math.max(railE, trackX(t) + CFG.TRACK_W / 2);
+		G.concX0 = railE + 2.5;
+		G.concX1 = G.concX0 + Math.max(15, 9 + gateCount() * 2.2 + S.concW * 2);
+	}
 	G.concCx = (G.concX0 + G.concX1) / 2;
 	G.concArea = (G.concX1 - G.concX0) * G.concD;
 	G.platArea = S.platW * G.platLen;
@@ -130,10 +149,15 @@ function recalcGeometry() {
 	// 階段はコンコースに覆われた範囲に収める
 	G.stairA = G.concZ0 + 4;
 	G.stairB = G.platZ1 - 4;
+	// 地平駅で線路を渡る構内踏切のZ
+	G.crossZ = G.platZ1 + 3;
 }
 
+// 階段は橋上駅舎があるときだけ。地平駅はホームへそのまま歩いて入れる
+function hasStairs() { return S.conc; }
 // ホームが短いと階段は何本も置けない。延伸すると増やせるようになる
 function maxStairs() {
+	if (!S.conc) return 0;
 	return Math.max(1, Math.min(CFG.MAX_STAIRS, Math.round(S.cars * CFG.CAR_LEN / 50)));
 }
 function platX(i) { return (i - (S.nPlat - 1) / 2) * (S.platW + 2 * CFG.TRACK_W + 1.4); }
@@ -618,6 +642,11 @@ function buildMaterials() {
 		color: 0xdfe6ec, roughness: 0.3, metalness: 0.05,
 		transparent: true, opacity: 0.34, depthWrite: false, side: THREE.DoubleSide,
 	});
+	// 駅舎の屋根。俯瞰で改札の行列が見えないと困るので少し透かす
+	MAT.roofSolid = std({
+		color: 0xb6bdc5, roughness: 0.6, metalness: 0.15,
+		transparent: true, opacity: 0.5, depthWrite: false, side: THREE.DoubleSide,
+	});
 	MAT.truss = std({ color: 0x5e6672, roughness: 0.6, metalness: 0.5 });
 	MAT.stair = std({ color: 0xc2c8cf, roughness: 0.85 });
 	MAT.esc = std({ color: 0x2f8f6a, roughness: 0.55, metalness: 0.35 });
@@ -840,33 +869,65 @@ function buildStation() {
 		addInstanced(poleGeo, MAT.catenary, poles, stationGroup, true);
 	}
 
-	/* ---- コンコース(橋上駅舎) ---- */
-	box(cw, 0.6, G.concD, MAT.concUnder, G.concCx, CFG.CONC_Y - 0.6, (G.concZ0 + G.concZ1) / 2, stationGroup);
+	/* ---- 駅舎 ---- */
+	const EY = G.entryY;
+	const wallH = 3.6;
+	const czc = (G.concZ0 + G.concZ1) / 2;
+
+	if (S.conc) {
+		// 橋上駅舎: 線路をまたぐ床を張る
+		box(cw, 0.6, G.concD, MAT.concUnder, G.concCx, EY - 0.6, czc, stationGroup);
+	}
 	const floor = new THREE.Mesh(new THREE.PlaneGeometry(cw, G.concD), MAT.conc);
 	floor.rotation.x = -Math.PI / 2;
-	floor.position.set(G.concCx, CFG.CONC_Y + 0.01, (G.concZ0 + G.concZ1) / 2);
+	floor.position.set(G.concCx, EY + 0.02, czc);
 	floor.receiveShadow = true;
 	stationGroup.add(floor);
 
 	// 壁は腰壁+ガラス。俯瞰で中が見えるよう天井は張らない
-	const wallH = 3.6;
 	for (const s of [-1, 1]) {
 		const wx = G.concCx + s * cw / 2;
-		box(0.35, 1.0, G.concD, MAT.concUnder, wx, CFG.CONC_Y, (G.concZ0 + G.concZ1) / 2, stationGroup);
-		box(0.3, wallH - 1.0, G.concD, MAT.glass, wx, CFG.CONC_Y + 1.0, (G.concZ0 + G.concZ1) / 2, stationGroup, true);
+		box(0.35, 1.0, G.concD, MAT.concUnder, wx, EY, czc, stationGroup);
+		box(0.3, wallH - 1.0, G.concD, MAT.glass, wx, EY + 1.0, czc, stationGroup, true);
 	}
 	for (const z of [G.concZ0, G.concZ1]) {
-		box(cw, 1.0, 0.35, MAT.concUnder, G.concCx, CFG.CONC_Y, z, stationGroup);
-		box(cw, wallH - 1.0, 0.3, MAT.glass, G.concCx, CFG.CONC_Y + 1.0, z, stationGroup, true);
+		// ホーム側の面は開けておく(そこから出入りする)
+		if (!S.conc && z === G.concZ0) continue;
+		box(cw, 1.0, 0.35, MAT.concUnder, G.concCx, EY, z, stationGroup);
+		box(cw, wallH - 1.0, 0.3, MAT.glass, G.concCx, EY + 1.0, z, stationGroup, true);
 	}
 	// 屋根の縁(庇)だけ回して建物の輪郭を出す
-	box(cw + 1.4, 0.3, 0.9, MAT.roof, G.concCx, CFG.CONC_Y + wallH, G.concZ0 - 0.4, stationGroup, true);
-	box(cw + 1.4, 0.3, 0.9, MAT.roof, G.concCx, CFG.CONC_Y + wallH, G.concZ1 + 0.4, stationGroup, true);
+	box(cw + 1.4, 0.3, 0.9, MAT.roof, G.concCx, EY + wallH, G.concZ0 - 0.4, stationGroup, true);
+	box(cw + 1.4, 0.3, 0.9, MAT.roof, G.concCx, EY + wallH, G.concZ1 + 0.4, stationGroup, true);
+	if (!S.conc) {
+		// 地平駅は屋根を架けて「駅舎」に見せる。縁だけ実体を出して輪郭を立てる
+		const rf2 = box(cw + 1.6, 0.3, G.concD + 1.8, MAT.roofSolid, G.concCx, EY + wallH, czc, stationGroup, true);
+		rf2.renderOrder = 4;
+		for (const s of [-1, 1]) {
+			box(0.5, 0.42, G.concD + 1.8, MAT.truss, G.concCx + s * (cw + 1.6) / 2, EY + wallH - 0.06, czc, stationGroup, true);
+			box(cw + 1.6, 0.42, 0.5, MAT.truss, G.concCx, EY + wallH - 0.06, czc + s * (G.concD + 1.8) / 2, stationGroup, true);
+		}
+		// 駅舎からホーム端まで渡る構内踏切
+		const xa = platX(0) - S.platW / 2;
+		box(G.concX0 + 3 - xa, 0.16, 4.0, MAT.stair,
+			(xa + G.concX0 + 3) / 2, 0.06, G.crossZ, stationGroup, true);
+		// 踏切からホームへ上がるスロープ
+		const rampLen = G.crossZ - (G.platZ1 - 3);
+		for (let i = 0; i < 6; i++) {
+			const f = (i + 0.5) / 6;
+			box(S.platW * 0.75, 0.22, rampLen / 6 + 0.1, MAT.stair,
+				platX(0), CFG.PLAT_Y * f - 0.11, G.crossZ - rampLen * f, stationGroup, true);
+		}
+		// 踏切の警報機
+		for (const s of [-1, 1]) {
+			box(0.3, 2.6, 0.3, MAT.handrail, xa - 1.5, 0, G.crossZ + s * 2.4, stationGroup, true);
+		}
+	}
 	// 天井の照明
 	const clampGeo = new THREE.BoxGeometry(3.0, 0.14, 0.3);
 	const clamps = [];
 	for (let x = G.concX0 + 6; x < G.concX1 - 3; x += 9) {
-		for (let z = G.concZ0 + 6; z < G.concZ1 - 3; z += 12) clamps.push([x, CFG.CONC_Y + wallH - 0.4, z]);
+		for (let z = G.concZ0 + 6; z < G.concZ1 - 3; z += 12) clamps.push([x, EY + wallH - 0.4, z]);
 	}
 	addInstanced(clampGeo, MAT.lamp, clamps, stationGroup, false);
 
@@ -882,15 +943,15 @@ function buildStation() {
 		if (gateIsManual(j)) {
 			// 通路の両脇にラッチ台。片側に駅員が立つ
 			for (const s of [-1, 1]) {
-				md.push([g.x + s * 0.95, CFG.CONC_Y, g.z]);
-				mp.push([g.x + s * 0.95, CFG.CONC_Y, g.z - 1.6]);
+				md.push([g.x + s * 0.95, EY, g.z]);
+				mp.push([g.x + s * 0.95, EY, g.z - 1.6]);
 			}
-			staff.push([g.x + 1.55, CFG.CONC_Y, g.z - 0.4, 0, Math.PI, 0]);
+			staff.push([g.x + 1.55, EY, g.z - 0.4, 0, Math.PI, 0]);
 		} else {
 			for (const s of [-1, 1]) {
-				gb.push([g.x + s * 0.85, CFG.CONC_Y + 0.5, g.z]);
-				gt.push([g.x + s * 0.85, CFG.CONC_Y + 1.05, g.z]);
-				gf.push([g.x + s * 0.55, CFG.CONC_Y + 0.36, g.z + 1.2]);
+				gb.push([g.x + s * 0.85, EY + 0.5, g.z]);
+				gt.push([g.x + s * 0.85, EY + 1.05, g.z]);
+				gf.push([g.x + s * 0.55, EY + 0.36, g.z + 1.2]);
 			}
 		}
 	}
@@ -904,8 +965,8 @@ function buildStation() {
 	// 改札の上の案内サイン(吊り下げ)。改札が無いうちは出さない
 	if (gateCount() > 0) {
 		const sgW = Math.min(cw - 6, 3 + gateCount() * 1.0);
-		box(sgW, 0.55, 0.12, MAT.sign, G.concCx, CFG.CONC_Y + 2.55, G.gateZ + 2.4, stationGroup, true);
-		box(sgW * 0.9, 0.34, 0.14, MAT.signFace, G.concCx, CFG.CONC_Y + 2.65, G.gateZ + 2.33, stationGroup, true);
+		box(sgW, 0.55, 0.12, MAT.sign, G.concCx, EY + 2.55, G.gateZ + 2.4, stationGroup, true);
+		box(sgW * 0.9, 0.34, 0.14, MAT.signFace, G.concCx, EY + 2.65, G.gateZ + 2.33, stationGroup, true);
 	}
 
 	/* ---- 駅ナカ店舗 / 券売機 ---- */
@@ -913,19 +974,32 @@ function buildStation() {
 		const side = s % 2 ? 1 : -1;
 		const idx = Math.floor(s / 2);
 		const sx = G.concCx + side * (cw / 2 - 5.5 - idx * 9);
-		const sz = G.gateZ - 18 - (idx % 2) * 9;
-		box(7, 2.9, 6, MAT.shop, sx, CFG.CONC_Y + 0.02, sz, stationGroup);
-		box(7.2, 0.5, 0.3, MAT.lamp, sx, CFG.CONC_Y + 2.5, sz - 3.1, stationGroup, false);
+		// 駅舎の中に収める(小さい地平駅でもはみ出さないように)
+		const sz = Math.min(G.concZ1 - 4, Math.max(G.concZ0 + 4,
+			G.gateZ + (S.conc ? -18 : 11) - (idx % 2) * 9));
+		box(7, 2.9, 6, MAT.shop, sx, EY + 0.02, sz, stationGroup);
+		box(7.2, 0.5, 0.3, MAT.lamp, sx, EY + 2.5, sz - 3.1, stationGroup, false);
 	}
 	const vendGeo = new THREE.BoxGeometry(1.1, 1.9, 0.7);
 	const vends = [];
 	for (let i = 0; i < Math.min(6, 1 + gateCount() / 8); i++) {
-		vends.push([G.concX0 + 3, CFG.CONC_Y + 0.95, G.gateZ + 6 + i * 2.2]);
+		vends.push([G.concX0 + 3, EY + 0.95,
+			Math.min(G.concZ1 - 3, G.gateZ + 6 + i * 2.2)]);
 	}
 	addInstanced(vendGeo, MAT.vend, vends, stationGroup, true);
 
-	/* ---- 出口デッキ ----
-	   線路の真上に降りられないので、デッキを線路脇まで横に渡してから地上に降ろす */
+	/* ---- 出口 ----
+	   地平駅は駅舎の外がそのまま駅前。橋上駅舎は線路の真上に降りられないので、
+	   デッキを線路脇まで横に渡してから地上に降ろす */
+	if (!S.conc) {
+		G.plazaX = G.concX1 + 10;
+		G.plazaCx = G.concCx;
+		G.plazaCz = G.exitZ + 22;
+		fitShadow();
+		buildCity();
+		return;
+	}
+
 	const dw = Math.min(cw, 60);
 	const deckZ = G.exitZ + 7;
 	box(dw, 0.6, 20, MAT.concUnder, G.concCx, CFG.CONC_Y - 0.6, deckZ, stationGroup);
@@ -969,6 +1043,7 @@ function buildStation() {
 		box(16 / dsteps + 0.1, 0.3, 10, MAT.stair,
 			G.plazaX + 16 * f, CFG.CONC_Y - CFG.CONC_Y * f, deckZ, stationGroup, true);
 	}
+	G.plazaCz = G.exitZ;
 
 	fitShadow();
 	buildCity();
@@ -1010,7 +1085,9 @@ function buildCity() {
 		for (let z = -reach; z <= reach; z += step) {
 			// 線路の帯・駅舎・駅前広場は空ける
 			if (Math.abs(x) < railHalf && z > -trackLen / 2 && z < trackLen / 2) continue;
-			if (x > G.concX0 - 10 && x < plazaX + 78 && z > G.concZ0 - 30 && z < G.exitZ + 40) continue;
+			// 駅舎と駅前広場のぶんを空ける
+			if (x > G.concX0 - 12 && x < (S.conc ? plazaX + 78 : G.concX1 + 12)
+				&& z > G.concZ0 - 12 && z < G.exitZ + 52) continue;
 			const d = Math.hypot(x, z);
 			if (d > reach || d < clear) continue;
 			// 区画の地色を敷いて、地面が単調にならないようにする
@@ -1062,11 +1139,13 @@ function buildCity() {
 	trGeo.translate(0, 1.7, 0);
 	addInstanced(trGeo, MAT.trunk, trees, cityGroup, false);
 
-	// 駅前広場(線路の東側)。駅の規模に合わせる
+	// 駅前広場。駅の規模に合わせる
 	const pw = 34 + grow * 60, pd = 30 + grow * 54;
 	const sq = new THREE.Mesh(new THREE.PlaneGeometry(pw, pd), MAT.road);
 	sq.rotation.x = -Math.PI / 2;
-	sq.position.set(plazaX + 18 + pw / 2, -0.38, G.exitZ);
+	const px = S.conc ? plazaX + 18 + pw / 2 : (G.plazaCx === undefined ? 0 : G.plazaCx);
+	const pz = G.plazaCz === undefined ? G.exitZ : G.plazaCz;
+	sq.position.set(px, -0.38, pz);
 	sq.receiveShadow = true;
 	cityGroup.add(sq);
 }
@@ -1221,40 +1300,54 @@ function newPax() {
 }
 
 function pathOut(p) {
-	// 降車 → 階段 → コンコース → 改札 → 出口
+	// 降車 → (階段) → 改札 → 出口
 	const px = platX(p.plat);
-	const k = pickStair(p.plat);
-	const sz = stairZ(k);
-	const path = [
-		{ x: px, y: CFG.PLAT_Y, z: sz + 2, res: 'stair', k: k },
-		{ x: px, y: CFG.CONC_Y, z: sz - 10, climb: true },
-	];
+	const path = [];
+	if (hasStairs()) {
+		const k = pickStair(p.plat);
+		const sz = stairZ(k);
+		path.push({ x: px, y: CFG.PLAT_Y, z: sz + 2, res: 'stair', k: k });
+		path.push({ x: px, y: CFG.CONC_Y, z: sz - 10, climb: true });
+	} else {
+		// 地平駅はホーム端のスロープを下り、構内踏切を渡って駅舎へ
+		path.push({ x: px, y: CFG.PLAT_Y, z: G.platZ1 - 3 });
+		path.push({ x: px, y: 0, z: G.crossZ });
+		path.push({ x: G.concX0 + 2, y: 0, z: G.crossZ });
+	}
 	// 改札が1つも無い無人駅では素通りする
 	const j = pickGate();
 	if (j >= 0) {
 		const g = gatePos(j);
-		path.push({ x: g.x, y: CFG.CONC_Y, z: g.z - 4, res: 'gate', j: j });
-		path.push({ x: g.x, y: CFG.CONC_Y, z: g.z + 4 });
+		path.push({ x: g.x, y: G.entryY, z: g.z - 4, res: 'gate', j: j });
+		path.push({ x: g.x, y: G.entryY, z: g.z + 4 });
 	}
-	path.push({ x: G.concCx + (Math.random() - 0.5) * 30, y: CFG.CONC_Y, z: G.exitZ + 12, exit: true });
+	// 出口は駅舎の幅の内側に収める(線路の上に湧かないように)
+	const ex = G.concX0 + 2 + Math.random() * Math.max(1, (G.concX1 - G.concX0) - 4);
+	path.push({ x: ex, y: G.entryY, z: G.exitZ + 12, exit: true });
 	return path;
 }
 
 function pathIn(p) {
 	const px = platX(p.plat);
-	const k = pickStair(p.plat);
-	const sz = stairZ(k);
 	const side = trackSide(p.track);
 	const di = Math.floor(Math.random() * G.nDoors);
 	const path = [];
 	const j = pickGate();
 	if (j >= 0) {
 		const g = gatePos(j);
-		path.push({ x: g.x, y: CFG.CONC_Y, z: g.z + 6, res: 'gate', j: j });
-		path.push({ x: g.x, y: CFG.CONC_Y, z: g.z - 6 });
+		path.push({ x: g.x, y: G.entryY, z: g.z + 6, res: 'gate', j: j });
+		path.push({ x: g.x, y: G.entryY, z: g.z - 6 });
 	}
-	path.push({ x: px, y: CFG.CONC_Y, z: sz - 10, res: 'stair', k: k });
-	path.push({ x: px, y: CFG.PLAT_Y, z: sz + 2, climb: true });
+	if (hasStairs()) {
+		const k = pickStair(p.plat);
+		const sz = stairZ(k);
+		path.push({ x: px, y: CFG.CONC_Y, z: sz - 10, res: 'stair', k: k });
+		path.push({ x: px, y: CFG.PLAT_Y, z: sz + 2, climb: true });
+	} else {
+		path.push({ x: G.concX0 + 2, y: 0, z: G.crossZ });
+		path.push({ x: px, y: 0, z: G.crossZ });
+		path.push({ x: px, y: CFG.PLAT_Y, z: G.platZ1 - 3 });
+	}
 	path.push({ x: px + side * (S.platW / 2 - 1.3), y: CFG.PLAT_Y, z: doorZ(di), board: true });
 	return path;
 }
@@ -1370,10 +1463,10 @@ function finishPax(p) {
 function crowdFactor(p) {
 	// 混雑していると歩けなくなる
 	let dens;
-	if (p.y > CFG.CONC_Y - 1) {
-		dens = R.concCount / Math.max(1, G.concArea);
-	} else {
+	if (Math.abs(p.y - CFG.PLAT_Y) < 0.25) {
 		dens = R.platCount[p.plat] / Math.max(1, G.platArea);
+	} else {
+		dens = R.concCount / Math.max(1, G.concArea);
 	}
 	// 1.2人/m² を超えると急激に遅くなる
 	return Math.max(0.22, Math.min(1, 1.15 - dens / 1.5));
@@ -1385,8 +1478,10 @@ function updatePax(dt) {
 	R.concCount = 0;
 	for (let i = 0; i < R.pax.length; i++) {
 		const p = R.pax[i];
-		if (p.y > CFG.CONC_Y - 1) R.concCount += p.w;
-		else if (p.plat < R.platCount.length) R.platCount[p.plat] += p.w;
+		// ホーム面の高さにいるならホーム、それ以外(地上/コンコース)は改札まわり
+		if (Math.abs(p.y - CFG.PLAT_Y) < 0.25) {
+			if (p.plat < R.platCount.length) R.platCount[p.plat] += p.w;
+		} else R.concCount += p.w;
 	}
 
 	for (let i = R.pax.length - 1; i >= 0; i--) {
@@ -1499,7 +1594,8 @@ function updateDemand(dt) {
 	while (R.inQHead < R.inQ.length && R.pax.length < CFG.MAX_PAX) {
 		const track = pickBoardTrack();
 		const p = addPax(1, trackPlat(track), track,
-			G.concCx + (Math.random() - 0.5) * 26, CFG.CONC_Y, G.exitZ + 12, R.inQ[R.inQHead]);
+			G.concX0 + 2 + Math.random() * Math.max(1, (G.concX1 - G.concX0) - 4),
+			G.entryY, G.exitZ + 12, R.inQ[R.inQHead]);
 		if (!p) break;
 		R.inQHead++;
 	}
@@ -1596,6 +1692,9 @@ function load() {
 		}
 		S.gateA = Math.max(0, Math.round(S.gateA));
 		S.gateM = Math.max(0, Math.round(S.gateM));
+		// 橋上駅舎が最初から在った頃のセーブは、建設済みとして引き継ぐ
+		if (typeof o.conc !== 'boolean') S.conc = true;
+		if (!S.conc && S.nPlat > 1) S.conc = true;
 		return true;
 	} catch (e) { return false; }
 }
@@ -1612,11 +1711,21 @@ const UPGRADES = [
 		apply: () => { S.cars += 2; },
 	},
 	{
+		id: 'bridge', ic: '🌉', name: '橋上駅舎を建設',
+		desc: '線路をまたぐ駅舎を建て、改札を2階へ移す。ホームへは階段で下りる形になり、'
+			+ 'ホームを2面以上に増やせるようになる。',
+		cost: () => 9000000 + 1800000 * S.nTrack,
+		can: () => !S.conc,
+		ng: () => '建設済み',
+		apply: () => { S.conc = true; if (S.stairs < 1) S.stairs = 1; },
+	},
+	{
 		id: 'stairs', ic: '🪜', name: '階段を増設',
 		desc: 'ホームとコンコースを結ぶ階段。少ないとホームに人が溜まる。',
 		cost: () => 700000 * Math.pow(1.9, S.stairs - 1) * S.nPlat,
-		can: () => S.stairs < maxStairs(),
-		ng: () => S.stairs < CFG.MAX_STAIRS ? 'ホームが短い(要延伸)' : '上限',
+		can: () => S.conc && S.stairs < maxStairs(),
+		ng: () => !S.conc ? '橋上駅舎が必要'
+			: (S.stairs < CFG.MAX_STAIRS ? 'ホームが短い(要延伸)' : '上限'),
 		apply: () => { S.stairs++; },
 	},
 	{
@@ -1658,8 +1767,8 @@ const UPGRADES = [
 		id: 'plat', ic: '🏗', name: 'ホームを増設',
 		desc: '島式ホームを1面追加。線路をさらに2本敷けるようになる。',
 		cost: () => 14000000 * Math.pow(1.55, S.nPlat - 1),
-		can: () => S.nPlat < 10,
-		ng: () => '上限',
+		can: () => S.conc && S.nPlat < 10,
+		ng: () => !S.conc ? '橋上駅舎が必要' : '上限',
 		apply: () => { S.nPlat++; },
 	},
 	{
@@ -1671,8 +1780,8 @@ const UPGRADES = [
 		apply: () => { S.platW += 2; },
 	},
 	{
-		id: 'conc', ic: '🏢', name: 'コンコース拡張',
-		desc: '改札階を左右に8mずつ拡張。滞留スペースと改札を置ける幅が増える。',
+		id: 'conc', ic: '🏢', name: '駅舎を拡張',
+		desc: '駅舎を左右に8mずつ拡張。滞留スペースと改札を置ける幅が増える。',
 		cost: () => 3400000 * Math.pow(1.3, S.concW / 8),
 		can: () => S.concW < 96,
 		ng: () => '上限',

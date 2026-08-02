@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>駅シム アイコン生成</title>
+<style>
+	body { background:#141a22; color:#dfe6ee; font-family:sans-serif; padding:20px; }
+	canvas { image-rendering:pixelated; background:#000; margin:6px; vertical-align:top; }
+	#log { white-space:pre; font-size:12px; opacity:.8; margin-top:12px; }
+</style>
+</head>
+<body>
+<h1>駅シム アイコン生成</h1>
+<p>このページを <code>node serve.mjs --dev</code> で開くと、アイコンPNGを書き出します。</p>
+<div id="out"></div>
+<div id="log"></div>
+
+<script>
+// ホームに停まる電車を正面から見た図。小さいサイズでも「駅」と分かる形にする。
+function drawIcon(ctx, S, rounded) {
+	const u = S / 100;              // 100を基準にした単位
+	ctx.clearRect(0, 0, S, S);
+
+	// 背景(角丸) — 空のグラデーション
+	if (rounded) {
+		const r = S * 0.22;
+		ctx.beginPath();
+		ctx.moveTo(r, 0); ctx.lineTo(S - r, 0); ctx.quadraticCurveTo(S, 0, S, r);
+		ctx.lineTo(S, S - r); ctx.quadraticCurveTo(S, S, S - r, S);
+		ctx.lineTo(r, S); ctx.quadraticCurveTo(0, S, 0, S - r);
+		ctx.lineTo(0, r); ctx.quadraticCurveTo(0, 0, r, 0);
+		ctx.closePath(); ctx.clip();
+	}
+	const sky = ctx.createLinearGradient(0, 0, 0, S);
+	sky.addColorStop(0, '#1d4e8f');
+	sky.addColorStop(0.55, '#3f86c9');
+	sky.addColorStop(1, '#7fb4dc');
+	ctx.fillStyle = sky; ctx.fillRect(0, 0, S, S);
+
+	// 上家(ホーム屋根)のシルエット
+	ctx.fillStyle = 'rgba(9,18,30,.42)';
+	ctx.beginPath();
+	ctx.moveTo(0, 26 * u); ctx.lineTo(S, 26 * u);
+	ctx.lineTo(S, 34 * u); ctx.lineTo(0, 34 * u);
+	ctx.closePath(); ctx.fill();
+
+	// 地面(軌道敷)
+	ctx.fillStyle = '#39414c'; ctx.fillRect(0, 72 * u, S, 28 * u);
+
+	// 左右のホーム
+	ctx.fillStyle = '#b9c0c8';
+	ctx.fillRect(0, 64 * u, 26 * u, 36 * u);
+	ctx.fillRect(74 * u, 64 * u, 26 * u, 36 * u);
+	// ホーム縁の点字ブロック(黄)
+	ctx.fillStyle = '#e8b91d';
+	ctx.fillRect(20 * u, 64 * u, 6 * u, 36 * u);
+	ctx.fillRect(74 * u, 64 * u, 6 * u, 36 * u);
+
+	// レール
+	ctx.fillStyle = '#8e97a1';
+	ctx.fillRect(36 * u, 88 * u, 4 * u, 12 * u);
+	ctx.fillRect(60 * u, 88 * u, 4 * u, 12 * u);
+
+	// 電車の前面
+	const cx = 50 * u, top = 30 * u, bot = 92 * u, hw = 19 * u;
+	ctx.fillStyle = '#f2f5f8';
+	ctx.beginPath();
+	ctx.moveTo(cx - hw, bot);
+	ctx.lineTo(cx - hw, top + 8 * u);
+	ctx.quadraticCurveTo(cx - hw, top, cx - hw + 8 * u, top);
+	ctx.lineTo(cx + hw - 8 * u, top);
+	ctx.quadraticCurveTo(cx + hw, top, cx + hw, top + 8 * u);
+	ctx.lineTo(cx + hw, bot);
+	ctx.closePath(); ctx.fill();
+
+	// 前面窓
+	ctx.fillStyle = '#101820';
+	ctx.beginPath();
+	ctx.moveTo(cx - 14 * u, top + 22 * u);
+	ctx.lineTo(cx - 14 * u, top + 9 * u);
+	ctx.quadraticCurveTo(cx - 14 * u, top + 5 * u, cx - 10 * u, top + 5 * u);
+	ctx.lineTo(cx + 10 * u, top + 5 * u);
+	ctx.quadraticCurveTo(cx + 14 * u, top + 5 * u, cx + 14 * u, top + 9 * u);
+	ctx.lineTo(cx + 14 * u, top + 22 * u);
+	ctx.closePath(); ctx.fill();
+
+	// 車体帯
+	ctx.fillStyle = '#d8006c';
+	ctx.fillRect(cx - hw, top + 27 * u, hw * 2, 7 * u);
+
+	// 前照灯
+	ctx.fillStyle = '#ffe9a8';
+	ctx.fillRect(cx - 15 * u, top + 40 * u, 7 * u, 5 * u);
+	ctx.fillRect(cx + 8 * u, top + 40 * u, 7 * u, 5 * u);
+
+	// スカート
+	ctx.fillStyle = '#2b3138';
+	ctx.fillRect(cx - hw, top + 50 * u, hw * 2, 12 * u);
+}
+
+async function save(canvas, name) {
+	const url = canvas.toDataURL('image/png');
+	const r = await fetch('/__shot?name=' + encodeURIComponent(name), { method: 'POST', body: url });
+	return name + ' → ' + (await r.text());
+}
+
+(async () => {
+	const out = document.getElementById('out'), log = document.getElementById('log');
+	const jobs = [
+		{ n: 'icon-192.png', s: 192, r: false },
+		{ n: 'icon-512.png', s: 512, r: false },
+		{ n: 'apple-touch-icon.png', s: 180, r: false },
+		{ n: 'icon-maskable-512.png', s: 512, r: false },
+		{ n: 'favicon-64.png', s: 64, r: true },
+	];
+	const lines = [];
+	for (const j of jobs) {
+		const c = document.createElement('canvas');
+		c.width = c.height = j.s;
+		c.style.width = Math.min(j.s, 128) + 'px';
+		drawIcon(c.getContext('2d'), j.s, j.r);
+		out.appendChild(c);
+		lines.push(await save(c, j.n));
+		log.textContent = lines.join('\n');
+	}
+	lines.push('done');
+	log.textContent = lines.join('\n');
+	window.__done = true;
+})();
+</script>
+</body>
+</html>
