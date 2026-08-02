@@ -336,6 +336,34 @@ function buildTextures() {
 		}
 	});
 
+	// 木造駅舎の下見板張り
+	TEX.wood = makeCanvas(256, (g, s) => {
+		g.fillStyle = '#cdbfa4'; g.fillRect(0, 0, s, s);
+		grain(g, s, 16);
+		const n = 10;
+		for (let i = 0; i < n; i++) {
+			const y = i * s / n;
+			g.fillStyle = 'rgba(120,100,72,' + (0.10 + Math.random() * 0.10) + ')';
+			g.fillRect(0, y, s, s / n * 0.16);
+			g.fillStyle = 'rgba(255,250,240,.06)';
+			g.fillRect(0, y + s / n * 0.16, s, s / n * 0.2);
+		}
+	});
+
+	// 瓦屋根
+	TEX.tile = makeCanvas(256, (g, s) => {
+		g.fillStyle = '#4a5058'; g.fillRect(0, 0, s, s);
+		grain(g, s, 14);
+		const n = 16;
+		for (let i = 0; i < n; i++) {
+			const x = i * s / n;
+			g.fillStyle = 'rgba(20,24,30,.30)';
+			g.fillRect(x, 0, s / n * 0.14, s);
+			g.fillStyle = 'rgba(190,200,214,.10)';
+			g.fillRect(x + s / n * 0.20, 0, s / n * 0.3, s);
+		}
+	});
+
 	// 地面(駅の外の土地)
 	TEX.land = makeCanvas(256, (g, s) => {
 		g.fillStyle = '#8d9184'; g.fillRect(0, 0, s, s);
@@ -648,6 +676,10 @@ function buildMaterials() {
 		transparent: true, opacity: 0.34, depthWrite: false, side: THREE.DoubleSide,
 	});
 	// 駅舎の屋根。俯瞰で改札の行列が見えないと困るので少し透かす
+	// 木造駅舎(地平の小駅)。ガラス張りにしないための材
+	MAT.wallWood = std({ map: rep(TEX.wood, 3, 1.2), color: 0xffffff, roughness: 0.9 });
+	MAT.roofTile = std({ map: rep(TEX.tile, 4, 3), color: 0xffffff, roughness: 0.75 });
+	MAT.beam = std({ color: 0x6b5540, roughness: 0.85 });
 	MAT.roofSolid = std({
 		color: 0xb6bdc5, roughness: 0.6, metalness: 0.15,
 		transparent: true, opacity: 0.5, depthWrite: false, side: THREE.DoubleSide,
@@ -895,28 +927,64 @@ function buildStation() {
 	floor.receiveShadow = true;
 	stationGroup.add(floor);
 
-	// 壁は腰壁+ガラス。俯瞰で中が見えるよう天井は張らない
-	for (const s of [-1, 1]) {
-		const wx = G.concCx + s * cw / 2;
-		box(0.35, 1.0, G.concD, MAT.concUnder, wx, EY, czc, stationGroup);
-		box(0.3, wallH - 1.0, G.concD, MAT.glass, wx, EY + 1.0, czc, stationGroup, true);
-	}
-	for (const z of [G.concZ0, G.concZ1]) {
-		// ホーム側の面は開けておく(そこから出入りする)
-		if (!hasLink() && z === G.concZ0) continue;
-		box(cw, 1.0, 0.35, MAT.concUnder, G.concCx, EY, z, stationGroup);
-		box(cw, wallH - 1.0, 0.3, MAT.glass, G.concCx, EY + 1.0, z, stationGroup, true);
-	}
-	// 屋根の縁(庇)だけ回して建物の輪郭を出す
-	box(cw + 1.4, 0.3, 0.9, MAT.roof, G.concCx, EY + wallH, G.concZ0 - 0.4, stationGroup, true);
-	box(cw + 1.4, 0.3, 0.9, MAT.roof, G.concCx, EY + wallH, G.concZ1 + 0.4, stationGroup, true);
-	if (!hasLink()) {
-		// 地平駅は屋根を架けて「駅舎」に見せる。縁だけ実体を出して輪郭を立てる
-		const rf2 = box(cw + 1.6, 0.3, G.concD + 1.8, MAT.roofSolid, G.concCx, EY + wallH, czc, stationGroup, true);
-		rf2.renderOrder = 4;
+	if (hasLink()) {
+		// 橋上/地下のコンコースは腰壁+ガラス。俯瞰で中が見えるよう天井は張らない
 		for (const s of [-1, 1]) {
-			box(0.5, 0.42, G.concD + 1.8, MAT.truss, G.concCx + s * (cw + 1.6) / 2, EY + wallH - 0.06, czc, stationGroup, true);
-			box(cw + 1.6, 0.42, 0.5, MAT.truss, G.concCx, EY + wallH - 0.06, czc + s * (G.concD + 1.8) / 2, stationGroup, true);
+			const wx = G.concCx + s * cw / 2;
+			box(0.35, 1.0, G.concD, MAT.concUnder, wx, EY, czc, stationGroup);
+			box(0.3, wallH - 1.0, G.concD, MAT.glass, wx, EY + 1.0, czc, stationGroup, true);
+		}
+		for (const z of [G.concZ0, G.concZ1]) {
+			box(cw, 1.0, 0.35, MAT.concUnder, G.concCx, EY, z, stationGroup);
+			box(cw, wallH - 1.0, 0.3, MAT.glass, G.concCx, EY + 1.0, z, stationGroup, true);
+		}
+		// 屋根の縁(庇)だけ回して建物の輪郭を出す
+		box(cw + 1.4, 0.3, 0.9, MAT.roof, G.concCx, EY + wallH, G.concZ0 - 0.4, stationGroup, true);
+		box(cw + 1.4, 0.3, 0.9, MAT.roof, G.concCx, EY + wallH, G.concZ1 + 0.4, stationGroup, true);
+	} else {
+		/* ---- 地平の小駅は木造駅舎。下見板張りの壁に切妻の瓦屋根 ---- */
+		const wh = 3.2;
+		// ホーム側(concZ0)は出入口なので開けておく
+		for (const s of [-1, 1]) {
+			box(0.3, wh, G.concD, MAT.wallWood, G.concCx + s * cw / 2, EY, czc, stationGroup);
+		}
+		box(cw, wh, 0.3, MAT.wallWood, G.concCx, EY, G.concZ1, stationGroup);
+		// 出入口側は左右に袖壁だけ残す
+		const openW = Math.min(cw * 0.5, 7);
+		for (const s of [-1, 1]) {
+			const ww = (cw - openW) / 2;
+			box(ww, wh, 0.3, MAT.wallWood, G.concCx + s * (openW + ww) / 2, EY, G.concZ0, stationGroup);
+		}
+		// 妻壁(切妻の三角部分)
+		const pitch = 0.36;                      // 屋根の勾配(rad)
+		const hw2 = (cw + 2.6) / 2;
+		const peak = Math.tan(pitch) * (cw / 2);
+		const ridge = EY + wh + Math.tan(pitch) * hw2;
+		const tri = new THREE.Shape();
+		tri.moveTo(-cw / 2, 0); tri.lineTo(cw / 2, 0); tri.lineTo(0, peak); tri.closePath();
+		for (const z of [G.concZ0, G.concZ1]) {
+			const g = new THREE.Mesh(new THREE.ShapeGeometry(tri), MAT.wallWood);
+			g.position.set(G.concCx, EY + wh, z);
+			g.castShadow = g.receiveShadow = true;
+			stationGroup.add(g);
+		}
+		// 切妻屋根。棟は線路と平行(Z方向)に通す
+		const slabLen = hw2 / Math.cos(pitch);
+		for (const s of [-1, 1]) {
+			const rf = new THREE.Mesh(
+				new THREE.BoxGeometry(slabLen, 0.26, G.concD + 2.6), MAT.roofTile);
+			rf.position.set(
+				G.concCx + s * (hw2 / 2),
+				EY + wh + Math.tan(pitch) * hw2 / 2,
+				czc);
+			rf.rotation.z = -s * pitch;
+			rf.castShadow = rf.receiveShadow = true;
+			stationGroup.add(rf);
+		}
+		// 棟と軒桁
+		box(0.5, 0.3, G.concD + 2.8, MAT.beam, G.concCx, ridge - 0.1, czc, stationGroup, true);
+		for (const s of [-1, 1]) {
+			box(0.28, 0.34, G.concD + 2.6, MAT.beam, G.concCx + s * hw2, EY + wh - 0.1, czc, stationGroup, true);
 		}
 		// 駅舎からホーム端まで渡る構内踏切
 		const xa = platX(0) - S.platW / 2;
@@ -941,13 +1009,18 @@ function buildStation() {
 			G.gateArms.push({ mesh: arm, px: bx, s: s, z: G.crossZ + 3.0 });
 		}
 	}
-	// 天井の照明
-	const clampGeo = new THREE.BoxGeometry(3.0, 0.14, 0.3);
-	const clamps = [];
-	for (let x = G.concX0 + 6; x < G.concX1 - 3; x += 9) {
-		for (let z = G.concZ0 + 6; z < G.concZ1 - 3; z += 12) clamps.push([x, EY + wallH - 0.4, z]);
+	// 天井の照明(木造駅舎は屋根で隠れるので置かない)
+	if (hasLink()) {
+		const clampGeo = new THREE.BoxGeometry(3.0, 0.14, 0.3);
+		const clamps = [];
+		for (let x = G.concX0 + 6; x < G.concX1 - 3; x += 9) {
+			for (let z = G.concZ0 + 6; z < G.concZ1 - 3; z += 12) clamps.push([x, EY + wallH - 0.4, z]);
+		}
+		addInstanced(clampGeo, MAT.lamp, clamps, stationGroup, false);
+	} else {
+		// 軒下の裸電球
+		box(0.5, 0.3, 0.5, MAT.lamp, G.concCx, EY + 2.9, G.concZ0 - 0.8, stationGroup, false);
 	}
-	addInstanced(clampGeo, MAT.lamp, clamps, stationGroup, false);
 
 	/* ---- 改札 ---- */
 	const gBodyGeo = new THREE.BoxGeometry(0.5, 1.0, 3.0);
