@@ -5,7 +5,9 @@ Three.js（`three.min.js` をローカル同梱、CDN不要）。
 
 ## 遊ぶ
 
-PCで `play-on-phone.bat` をダブルクリック → 表示されたURLをスマホ（同じWi-Fi）で開く。
+https://michael-anderson-official.github.io/station-sim/
+
+PCから配信する場合は `play-on-phone.bat` をダブルクリック → 表示されたURLをスマホ（同じWi-Fi）で開く。
 
 ```bash
 node serve.mjs
@@ -28,8 +30,15 @@ PCだけで遊ぶなら http://localhost:8370
 |---|---|
 | 改札機 | 1台 約1.6秒に1人 |
 | 階段 | 1つ 約0.85秒に1人（エスカレーター化で約2倍） |
-| 線路 | 1本あたり 1編成1500人 ÷ 運行間隔 |
+| ホーム有効長 | 1両150人。2両=300人 〜 16両=2400人。短いほど運行本数も少ない |
+| 線路 | 1本あたり 1編成の空き ÷ 運行間隔 |
 | ホーム幅・コンコース幅 | 混雑密度 → 歩行速度に影響 |
+
+ホームが短いと階段も置けない（50mにつき1つ、最大6つ）ので、
+**延伸は「輸送力・運行本数・階段の数」の3つを同時に開ける**。
+
+満足度は「駅の中で無駄に過ごした時間」で決まる。次の列車を待つ時間そのものは
+駅のせいではないので除外し、**1本乗り遅れた（積み残された）分だけ**を罰する。
 
 処理能力を超えると駅に入りきらず **入場規制**（駅前に行列）になり、
 待たされすぎた客は諦めて帰る＝評判に直撃する。
@@ -60,10 +69,25 @@ PCだけで遊ぶなら http://localhost:8370
 
 ```js
 sim.step(3600)     // 1時間進める
-sim.buy('track')   // 増築（id: stairs/esc/gates/track/plat/platw/conc/shop）
+sim.buy('cars')    // 増築（id: cars/stairs/esc/gates/track/plat/platw/conc/shop）
 sim.S              // 状態
+sim.three          // renderer / scene / camera
 sim.reset()        // セーブ削除して再読み込み
 ```
+
+画面を直接見られない環境用に、描画結果をPNGで書き出せる。
+`node serve.mjs --dev` で起動し、`?dev=1` を付けて開いてから:
+
+```js
+await sim.shot(1280, 800, 9)   // 幅, 高さ, 時刻 → shot.png に保存
+```
+
+### 描画まわりの注意
+
+同梱の three は ColorManagement が無い世代なので、マテリアルに16進色を直接渡すと
+リニア値として扱われ ACES を通って白飛びする。色は必ず `C(0x……)`
+（`convertSRGBToLinear`）を通すこと。空の ShaderMaterial も
+`tonemapping_fragment` / `encodings_fragment` を自前で include している。
 
 ## 調整メモ
 
@@ -72,6 +96,8 @@ sim.reset()        // セーブ削除して再読み込み
 - `demandPerSec()` の `base`（初期需要。現在 120人/時）
 - `endOfDay()` の `growth`（街の成長率。現在 評判90で約33%/日）
 - `RANKS`（ランクの必要乗降客数）
-- `trainHeadway()`（運行間隔。ランクが上がると増発）
+- `trainHeadway()`（運行間隔。ランクと編成長で決まる）
+- `CFG.LOAD_ROOM` / `CFG.ALIGHT_ROOM`（到着した列車の空き具合＝積み残しやすさ）
 
-現状の計算では 新宿級 300万人/日 におよそ **7面14線** 相当が必要（実際の新宿は8面16線）。
+貪欲AIで通した実測では、2両1面1線のまま放置すると5日目あたりから満足度が落ちはじめ、
+7日目には92まで下がる。延伸・増線すると回復する。

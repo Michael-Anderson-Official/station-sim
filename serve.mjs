@@ -16,7 +16,28 @@ const MIME = {
 	".ico": "image/x-icon",
 };
 
+// 開発用: `node serve.mjs --dev` のときだけ、描画結果のPNGを受け取って保存する。
+// ブラウザの画面を直接見られない環境で見た目を確認するための口。
+const DEV = process.argv.includes("--dev");
+
 const server = http.createServer((req, res) => {
+	if (DEV && req.method === "POST" && req.url === "/__shot") {
+		const chunks = [];
+		let size = 0;
+		req.on("data", c => {
+			size += c.length;
+			if (size > 12 * 1024 * 1024) { req.destroy(); return; }
+			chunks.push(c);
+		});
+		req.on("end", () => {
+			const body = Buffer.concat(chunks).toString("utf8");
+			const b64 = body.replace(/^data:image\/png;base64,/, "");
+			fs.writeFileSync(path.join(ROOT, "shot.png"), Buffer.from(b64, "base64"));
+			res.writeHead(200); res.end("ok");
+		});
+		return;
+	}
+
 	let p = decodeURIComponent(new URL(req.url, "http://x").pathname);
 	if (p === "/") p = "/index.html";
 	const file = path.join(ROOT, path.normalize(p));
