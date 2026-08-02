@@ -75,7 +75,7 @@ function defaultState() {
 		nPlat: 1,             // ホーム面数
 		nTrack: 1,            // 線路本数
 		platW: 6,             // ホーム幅
-		stairs: 1,            // 各ホームの階段数
+		stairs: 0,            // 各ホームの階段数(地平駅では0)
 		esc: false,           // エスカレーター化
 		gateM: 0,             // 手動改札(駅員配置)の通路数
 		gateA: 0,             // 自動改札の通路数
@@ -750,7 +750,8 @@ function buildStation() {
 
 	const L = G.platLen;
 	const RUN = 10;                        // 階段の水平投影長
-	const rise = CFG.CONC_Y - CFG.PLAT_Y;
+	// 橋上なら正(上り)、地下なら負(下り)
+	const rise = G.entryY - CFG.PLAT_Y;
 	const trackLen = L + 520;
 	const cw = G.concX1 - G.concX0;
 
@@ -820,21 +821,23 @@ function buildStation() {
 		box(3.4, 0.7, 0.1, MAT.signFace, x, CFG.CONC_Y - 2.6, signZ, stationGroup, true);
 		box(3.6, 0.16, 0.14, MAT.sign, x, CFG.CONC_Y - 2.0, signZ, stationGroup, true);
 
-		/* ---- 階段 / エスカレーター ---- */
-		for (let k = 0; k < S.stairs; k++) {
+		/* ---- 階段 / エスカレーター ----
+		   地平駅には無い。橋上なら上り、地下なら下りになる */
+		if (hasStairs()) for (let k = 0; k < S.stairs; k++) {
 			const sz = stairZ(k);
+			const len = Math.hypot(rise, RUN);
+			const ang = -Math.atan2(rise, RUN);
 			if (S.esc) {
 				// トラス + ステップ帯 + 手すり
-				const len = Math.hypot(rise, RUN);
 				const body = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.75, len), MAT.esc);
 				body.position.set(x, CFG.PLAT_Y + rise / 2, sz - RUN / 2);
-				body.rotation.x = -Math.atan2(rise, RUN);
+				body.rotation.x = ang;
 				body.castShadow = body.receiveShadow = true;
 				stationGroup.add(body);
 				for (const s of [-1, 1]) {
 					const hr = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.9, len), MAT.handrail);
 					hr.position.set(x + s * 1.45, CFG.PLAT_Y + rise / 2 + 0.6, sz - RUN / 2);
-					hr.rotation.x = -Math.atan2(rise, RUN);
+					hr.rotation.x = ang;
 					hr.castShadow = true;
 					stationGroup.add(hr);
 				}
@@ -846,10 +849,9 @@ function buildStation() {
 					stepPlates.push([x, CFG.PLAT_Y + rise * f - 0.11, sz - RUN * f]);
 				}
 				for (const s of [-1, 1]) {
-					const len = Math.hypot(rise, RUN);
 					const hr = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.85, len), MAT.handrail);
 					hr.position.set(x + s * 1.5, CFG.PLAT_Y + rise / 2 + 0.55, sz - RUN / 2);
-					hr.rotation.x = -Math.atan2(rise, RUN);
+					hr.rotation.x = ang;
 					hr.castShadow = true;
 					stationGroup.add(hr);
 				}
@@ -1405,7 +1407,7 @@ function pathOut(p) {
 		const k = pickStair(p.plat);
 		const sz = stairZ(k);
 		path.push({ x: px, y: CFG.PLAT_Y, z: sz + 2, res: 'stair', k: k });
-		path.push({ x: px, y: G.entryY, z: sz - (isBridge() ? 10 : -10), climb: true });
+		path.push({ x: px, y: G.entryY, z: sz - 10, climb: true });
 	} else {
 		// 地平駅はホーム端のスロープを下り、構内踏切を渡って駅舎へ
 		path.push({ x: px, y: CFG.PLAT_Y, z: G.platZ1 - 3 });
@@ -1447,7 +1449,7 @@ function pathIn(p) {
 	if (hasStairs()) {
 		const k = pickStair(p.plat);
 		const sz = stairZ(k);
-		path.push({ x: px, y: G.entryY, z: sz - (isBridge() ? 10 : -10), res: 'stair', k: k });
+		path.push({ x: px, y: G.entryY, z: sz - 10, res: 'stair', k: k });
 		path.push({ x: px, y: CFG.PLAT_Y, z: sz + 2, climb: true });
 	} else {
 		path.push({ x: G.concX0 + 2, y: 0, z: G.crossZ, res: 'cross', qx: 1 });
@@ -1804,7 +1806,7 @@ function load() {
 		S.cars = Math.max(CFG.CARS_MIN, Math.min(CFG.CARS_MAX, Math.round(S.cars / 2) * 2));
 		S.nPlat = Math.max(1, Math.min(10, Math.round(S.nPlat)));
 		S.nTrack = Math.max(1, Math.min(S.nPlat * 2, Math.round(S.nTrack)));
-		S.stairs = Math.max(1, Math.round(S.stairs));
+		S.stairs = Math.max(0, Math.round(S.stairs));
 		// 改札が「最初から2台」だった頃のセーブは、その台数を自動改札とみなす
 		if (typeof o.gateA !== 'number' && typeof o.gates === 'number') {
 			S.gateA = Math.max(0, Math.round(o.gates));
@@ -1960,7 +1962,8 @@ function renderUpgrades() {
 }
 
 function resetRuntimeForLayout() {
-	S.stairs = Math.max(1, Math.min(S.stairs, maxStairs()));
+	// 地平駅に階段は無い。立体交差なら最低1つ
+	S.stairs = hasLink() ? Math.max(1, Math.min(S.stairs, maxStairs())) : 0;
 	recalcGeometry();
 	R.stairFree = [];
 	for (let i = 0; i < S.nPlat; i++) {
