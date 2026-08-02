@@ -24,6 +24,10 @@ const CFG = {
 	WALK: 1.35,            // 歩行速度 m/s
 	GATE_M_HEADWAY: 2.8,   // 手動改札(駅員)1通路が1人を通す秒数
 	GATE_A_HEADWAY: 1.4,   // 自動改札1通路が1人を通す秒数
+	CROSS_HEADWAY: 0.25,   // 構内踏切が1人を通す秒数
+	CROSS_CLEAR: 8,        // 列車が抜けてから踏切が開くまでの秒数
+	CROSS_WARN: 25,        // 列車接近で閉まりはじめる秒数
+	UNDER_Y: 7.2,          // 地下コンコースの深さ
 	STAFF_WAGE: 42000,     // 駅員1人あたりの1日の人件費
 	NO_GATE_FARE: 0.55,    // 改札が1つも無いときに回収できる運賃の割合
 	STAIR_HEADWAY: 0.85,   // 階段1つが1人を通す秒数
@@ -67,7 +71,7 @@ function defaultState() {
 		rep: 70,              // 評判 0-100
 		town: 1,              // 街の発展度(需要倍率)
 		cars: 2,              // ホーム有効長(両)
-		conc: false,          // 橋上駅舎(コンコース)を建てたか
+		link: 0,              // ホームへの動線 0=地平(構内踏切) 1=橋上駅舎 2=地下道
 		nPlat: 1,             // ホーム面数
 		nTrack: 1,            // 線路本数
 		platW: 6,             // ホーム幅
@@ -94,6 +98,7 @@ const R = {
 	inAccum: 0,           // 入場客のスポーン端数
 	inQ: [], inQHead: 0,  // 駅に入りきらない入場客(到着時刻のFIFO)
 	waitN: [1], waitW: [0], maxWaitW: 1,   // 線路ごとの待機客(全走査を避けるためのカウンタ)
+	crossFree: [0], crossOpenAt: 0, crossClosed: false,   // 構内踏切
 	stairFree: [],        // [plat][k] 階段が空く時刻
 	gateFree: [],         // 改札レーンが空く時刻
 	platCount: [],        // ホーム上の人数(混雑計算用)
@@ -115,9 +120,9 @@ function recalcGeometry() {
 	G.platZ1 = G.platLen / 2;
 	// 駅舎の大きさは駅の規模に合わせる。小駅に巨大な橋上駅舎が載らないように
 	G.concD = Math.max(20, Math.min(92, 12 + gateCount() * 0.9 + G.platLen * 0.10));
-	if (S.conc) {
-		// 橋上駅舎: ホームの北端にまたがり、乗客は階段で上り下りする
-		G.entryY = CFG.CONC_Y;
+	if (hasLink()) {
+		// 橋上/地下: ホームの北端にまたがり、乗客は階段で上り下りする
+		G.entryY = isBridge() ? CFG.CONC_Y : -CFG.UNDER_Y;
 		G.over = Math.min(G.concD * 0.55, Math.max(10, G.platLen * 0.32));
 		G.concZ0 = G.platZ1 - G.over;
 	} else {
@@ -128,9 +133,9 @@ function recalcGeometry() {
 		G.concZ0 = G.platZ1 + 6;
 	}
 	G.concZ1 = G.concZ0 + G.concD;
-	G.gateZ = S.conc ? G.concZ1 - Math.min(18, G.concD * 0.34) : G.concZ0 + Math.min(9, G.concD * 0.42);
+	G.gateZ = hasLink() ? G.concZ1 - Math.min(18, G.concD * 0.34) : G.concZ0 + Math.min(9, G.concD * 0.42);
 	G.exitZ = G.concZ1 + 8;
-	if (S.conc) {
+	if (hasLink()) {
 		G.concX0 = platX(0) - G.unitW / 2 - 7 - S.concW;
 		G.concX1 = platX(S.nPlat - 1) + G.unitW / 2 + 7 + S.concW;
 	} else {
@@ -153,11 +158,17 @@ function recalcGeometry() {
 	G.crossZ = G.platZ1 + 3;
 }
 
-// 階段は橋上駅舎があるときだけ。地平駅はホームへそのまま歩いて入れる
-function hasStairs() { return S.conc; }
+// ホームへの動線。地平は構内踏切、橋上/地下は階段
+function hasLink() { return S.link !== 0; }
+function isBridge() { return S.link === 1; }
+function isUnder() { return S.link === 2; }
+const LINK_NAME = ['地平', '橋上', '地下'];
+
+// 階段は立体交差の動線があるときだけ。地平駅は踏切を渡ってそのまま入れる
+function hasStairs() { return hasLink(); }
 // ホームが短いと階段は何本も置けない。延伸すると増やせるようになる
 function maxStairs() {
-	if (!S.conc) return 0;
+	if (!hasLink()) return 0;
 	return Math.max(1, Math.min(CFG.MAX_STAIRS, Math.round(S.cars * CFG.CAR_LEN / 50)));
 }
 function platX(i) { return (i - (S.nPlat - 1) / 2) * (S.platW + 2 * CFG.TRACK_W + 1.4); }
@@ -518,14 +529,8 @@ function initThree() {
 	initSky();
 
 	// 地面
-	const ground = new THREE.Mesh(
-		new THREE.PlaneGeometry(9000, 9000),
-		new THREE.MeshStandardMaterial({ map: rep(TEX.land, 110, 110), color: 0xffffff, roughness: 1 })
-	);
-	ground.rotation.x = -Math.PI / 2;
-	ground.position.y = -0.45;
-	ground.receiveShadow = true;
-	scene.add(ground);
+	MAT.ground = new THREE.MeshStandardMaterial({ map: rep(TEX.land, 1, 1), color: 0xffffff, roughness: 1 });
+	MAT.ground.map.repeat.set(1 / 82, 1 / 82);   // ShapeGeometry の UV はワールド座標
 
 	stationGroup = new THREE.Group();
 	scene.add(stationGroup);
@@ -741,6 +746,7 @@ function disposeGroup(g) {
 function buildStation() {
 	recalcGeometry();
 	disposeGroup(stationGroup);
+	G.gateArms = [];
 
 	const L = G.platLen;
 	const RUN = 10;                        // 階段の水平投影長
@@ -874,8 +880,11 @@ function buildStation() {
 	const wallH = 3.6;
 	const czc = (G.concZ0 + G.concZ1) / 2;
 
-	if (S.conc) {
+	if (isBridge()) {
 		// 橋上駅舎: 線路をまたぐ床を張る
+		box(cw, 0.6, G.concD, MAT.concUnder, G.concCx, EY - 0.6, czc, stationGroup);
+	} else if (isUnder()) {
+		// 地下コンコース: 掘り下げた床。地面は buildCity 側でくり抜く
 		box(cw, 0.6, G.concD, MAT.concUnder, G.concCx, EY - 0.6, czc, stationGroup);
 	}
 	const floor = new THREE.Mesh(new THREE.PlaneGeometry(cw, G.concD), MAT.conc);
@@ -892,14 +901,14 @@ function buildStation() {
 	}
 	for (const z of [G.concZ0, G.concZ1]) {
 		// ホーム側の面は開けておく(そこから出入りする)
-		if (!S.conc && z === G.concZ0) continue;
+		if (!hasLink() && z === G.concZ0) continue;
 		box(cw, 1.0, 0.35, MAT.concUnder, G.concCx, EY, z, stationGroup);
 		box(cw, wallH - 1.0, 0.3, MAT.glass, G.concCx, EY + 1.0, z, stationGroup, true);
 	}
 	// 屋根の縁(庇)だけ回して建物の輪郭を出す
 	box(cw + 1.4, 0.3, 0.9, MAT.roof, G.concCx, EY + wallH, G.concZ0 - 0.4, stationGroup, true);
 	box(cw + 1.4, 0.3, 0.9, MAT.roof, G.concCx, EY + wallH, G.concZ1 + 0.4, stationGroup, true);
-	if (!S.conc) {
+	if (!hasLink()) {
 		// 地平駅は屋根を架けて「駅舎」に見せる。縁だけ実体を出して輪郭を立てる
 		const rf2 = box(cw + 1.6, 0.3, G.concD + 1.8, MAT.roofSolid, G.concCx, EY + wallH, czc, stationGroup, true);
 		rf2.renderOrder = 4;
@@ -918,9 +927,16 @@ function buildStation() {
 			box(S.platW * 0.75, 0.22, rampLen / 6 + 0.1, MAT.stair,
 				platX(0), CFG.PLAT_Y * f - 0.11, G.crossZ - rampLen * f, stationGroup, true);
 		}
-		// 踏切の警報機
+		// 踏切の警報機と遮断機。遮断桿は開閉でZ軸まわりに回す
+		G.gateArms = [];
 		for (const s of [-1, 1]) {
-			box(0.3, 2.6, 0.3, MAT.handrail, xa - 1.5, 0, G.crossZ + s * 2.4, stationGroup, true);
+			const bx = s < 0 ? xa - 1.6 : G.concX0 + 1.6;
+			box(0.3, 2.8, 0.3, MAT.gate, bx, 0, G.crossZ + 3.0, stationGroup, true);
+			const arm = new THREE.Mesh(new THREE.BoxGeometry(6.5, 0.22, 0.22), MAT.vend);
+			arm.position.set(bx - s * 3.25, 2.2, G.crossZ + 3.0);
+			arm.castShadow = true;
+			stationGroup.add(arm);
+			G.gateArms.push({ mesh: arm, px: bx, s: s, z: G.crossZ + 3.0 });
 		}
 	}
 	// 天井の照明
@@ -976,7 +992,7 @@ function buildStation() {
 		const sx = G.concCx + side * (cw / 2 - 5.5 - idx * 9);
 		// 駅舎の中に収める(小さい地平駅でもはみ出さないように)
 		const sz = Math.min(G.concZ1 - 4, Math.max(G.concZ0 + 4,
-			G.gateZ + (S.conc ? -18 : 11) - (idx % 2) * 9));
+			G.gateZ + (hasLink() ? -18 : 11) - (idx % 2) * 9));
 		box(7, 2.9, 6, MAT.shop, sx, EY + 0.02, sz, stationGroup);
 		box(7.2, 0.5, 0.3, MAT.lamp, sx, EY + 2.5, sz - 3.1, stationGroup, false);
 	}
@@ -991,10 +1007,46 @@ function buildStation() {
 	/* ---- 出口 ----
 	   地平駅は駅舎の外がそのまま駅前。橋上駅舎は線路の真上に降りられないので、
 	   デッキを線路脇まで横に渡してから地上に降ろす */
-	if (!S.conc) {
+	if (!hasLink()) {
 		G.plazaX = G.concX1 + 10;
 		G.plazaCx = G.concCx;
 		G.plazaCz = G.exitZ + 22;
+		fitShadow();
+		buildCity();
+		return;
+	}
+
+	if (isUnder()) {
+		// 地下は線路の脇まで掘り進めて、そこから地上へ上がる
+		G.plazaX = G.concX1 + 26;
+		G.plazaCx = G.plazaX + 20;
+		G.plazaCz = G.exitZ;
+		const runLen = G.plazaX - G.concX1 + 6;
+		box(runLen, 0.6, 14, MAT.concUnder, G.concX1 + runLen / 2 - 3, EY - 0.6, G.exitZ, stationGroup);
+		const cor = new THREE.Mesh(new THREE.PlaneGeometry(runLen, 14), MAT.conc);
+		cor.rotation.x = -Math.PI / 2;
+		cor.position.set(G.concX1 + runLen / 2 - 3, EY + 0.02, G.exitZ);
+		cor.receiveShadow = true;
+		stationGroup.add(cor);
+		// 地上へ上がる階段
+		const us = 16;
+		for (let i = 0; i < us; i++) {
+			const f = (i + 0.5) / us;
+			box(14 / us + 0.1, 0.3, 8, MAT.stair,
+				G.plazaX - 4 + 14 * f, EY + (0 - EY) * f, G.exitZ, stationGroup, true);
+		}
+		G.holeX = [G.concX0 - 1, G.plazaX + 12];
+		G.holeZ = [G.concZ0 - 1, G.concZ1 + 1];
+		// 掘り込みの擁壁。線路の下は通すので、線路にかかる部分は空ける
+		const wallY = -0.45 - EY;
+		for (const hz of G.holeZ) {
+			box(G.holeX[1] - G.holeX[0] + 1.2, wallY, 0.6, MAT.concUnder,
+				(G.holeX[0] + G.holeX[1]) / 2, EY, hz, stationGroup);
+		}
+		for (const hx of G.holeX) {
+			box(0.6, wallY, G.holeZ[1] - G.holeZ[0], MAT.concUnder,
+				hx, EY, (G.holeZ[0] + G.holeZ[1]) / 2, stationGroup);
+		}
 		fitShadow();
 		buildCity();
 		return;
@@ -1057,8 +1109,33 @@ function srand() {
 	return _seed / 4294967296;
 }
 
+// 地面。地下コンコースがあるときは、その部分をくり抜いて中を見えるようにする
+let groundMesh = null;
+function buildGround() {
+	if (groundMesh) { scene.remove(groundMesh); groundMesh.geometry.dispose(); }
+	const H = 4500;
+	const sh = new THREE.Shape();
+	sh.moveTo(-H, -H); sh.lineTo(H, -H); sh.lineTo(H, H); sh.lineTo(-H, H); sh.closePath();
+	if (isUnder() && G.holeX) {
+		const h = new THREE.Path();
+		// Shape はXY平面。回転後に -Z が +Y に来るので z は符号を反転して渡す
+		h.moveTo(G.holeX[0], -G.holeZ[0]);
+		h.lineTo(G.holeX[1], -G.holeZ[0]);
+		h.lineTo(G.holeX[1], -G.holeZ[1]);
+		h.lineTo(G.holeX[0], -G.holeZ[1]);
+		h.closePath();
+		sh.holes.push(h);
+	}
+	groundMesh = new THREE.Mesh(new THREE.ShapeGeometry(sh), MAT.ground);
+	groundMesh.rotation.x = -Math.PI / 2;
+	groundMesh.position.y = -0.45;
+	groundMesh.receiveShadow = true;
+	scene.add(groundMesh);
+}
+
 function buildCity() {
 	disposeGroup(cityGroup);
+	buildGround();
 	_seed = 20260802;
 
 	const railHalf = Math.abs(trackX(S.nTrack - 1)) + CFG.TRACK_W * 2 + 14;
@@ -1086,7 +1163,7 @@ function buildCity() {
 			// 線路の帯・駅舎・駅前広場は空ける
 			if (Math.abs(x) < railHalf && z > -trackLen / 2 && z < trackLen / 2) continue;
 			// 駅舎と駅前広場のぶんを空ける
-			if (x > G.concX0 - 12 && x < (S.conc ? plazaX + 78 : G.concX1 + 12)
+			if (x > G.concX0 - 12 && x < (hasLink() ? plazaX + 78 : G.concX1 + 12)
 				&& z > G.concZ0 - 12 && z < G.exitZ + 52) continue;
 			const d = Math.hypot(x, z);
 			if (d > reach || d < clear) continue;
@@ -1143,7 +1220,7 @@ function buildCity() {
 	const pw = 34 + grow * 60, pd = 30 + grow * 54;
 	const sq = new THREE.Mesh(new THREE.PlaneGeometry(pw, pd), MAT.road);
 	sq.rotation.x = -Math.PI / 2;
-	const px = S.conc ? plazaX + 18 + pw / 2 : (G.plazaCx === undefined ? 0 : G.plazaCx);
+	const px = hasLink() ? plazaX + 18 + pw / 2 : (G.plazaCx === undefined ? 0 : G.plazaCx);
 	const pz = G.plazaCz === undefined ? G.exitZ : G.plazaCz;
 	sq.position.set(px, -0.38, pz);
 	sq.receiveShadow = true;
@@ -1290,6 +1367,27 @@ function updateTrains(dt) {
 		}
 		tr.mesh.position.z = tr.z;
 	}
+
+	// 構内踏切は列車が抜けきるまで閉じる。いつ開くかを見積もっておく
+	let block = 0;
+	if (S.link === 0) {
+		const clearLen = G.platLen / 2 + 60;
+		for (const tr of R.trains) {
+			let rem;
+			if (tr.phase === 'approach') {
+				const toStop = -tr.z / 42;
+				if (toStop > CFG.CROSS_WARN) continue;     // まだ遠いので開けておく
+				rem = toStop + CFG.DWELL_MIN + clearLen / 40 + CFG.CROSS_CLEAR;
+			} else if (tr.phase === 'dwell') {
+				rem = Math.max(0, CFG.DWELL_MIN - tr.dwell) + clearLen / 40 + CFG.CROSS_CLEAR;
+			} else {
+				rem = Math.max(0, (clearLen - tr.z) / 40) + CFG.CROSS_CLEAR;
+			}
+			block = Math.max(block, rem);
+		}
+	}
+	R.crossOpenAt = R.now + block;
+	R.crossClosed = block > 0;
 }
 
 /* ================= 乗客 ================= */
@@ -1307,11 +1405,11 @@ function pathOut(p) {
 		const k = pickStair(p.plat);
 		const sz = stairZ(k);
 		path.push({ x: px, y: CFG.PLAT_Y, z: sz + 2, res: 'stair', k: k });
-		path.push({ x: px, y: CFG.CONC_Y, z: sz - 10, climb: true });
+		path.push({ x: px, y: G.entryY, z: sz - (isBridge() ? 10 : -10), climb: true });
 	} else {
 		// 地平駅はホーム端のスロープを下り、構内踏切を渡って駅舎へ
 		path.push({ x: px, y: CFG.PLAT_Y, z: G.platZ1 - 3 });
-		path.push({ x: px, y: 0, z: G.crossZ });
+		path.push({ x: px, y: 0, z: G.crossZ, res: 'cross', qz: -1 });
 		path.push({ x: G.concX0 + 2, y: 0, z: G.crossZ });
 	}
 	// 改札が1つも無い無人駅では素通りする
@@ -1321,9 +1419,15 @@ function pathOut(p) {
 		path.push({ x: g.x, y: G.entryY, z: g.z - 4, res: 'gate', j: j });
 		path.push({ x: g.x, y: G.entryY, z: g.z + 4 });
 	}
-	// 出口は駅舎の幅の内側に収める(線路の上に湧かないように)
-	const ex = G.concX0 + 2 + Math.random() * Math.max(1, (G.concX1 - G.concX0) - 4);
-	path.push({ x: ex, y: G.entryY, z: G.exitZ + 12, exit: true });
+	// 出口。地下は階段を上がって地上へ出る
+	if (isUnder()) {
+		path.push({ x: G.concX1 + 20, y: G.entryY, z: G.exitZ });
+		path.push({ x: G.concX1 + 40 + Math.random() * 10, y: 0, z: G.exitZ + (Math.random() - 0.5) * 12, exit: true });
+	} else {
+		// 駅舎の幅の内側に収める(線路の上に湧かないように)
+		const ex = G.concX0 + 2 + Math.random() * Math.max(1, (G.concX1 - G.concX0) - 4);
+		path.push({ x: ex, y: G.entryY, z: G.exitZ + 12, exit: true });
+	}
 	return path;
 }
 
@@ -1332,6 +1436,8 @@ function pathIn(p) {
 	const side = trackSide(p.track);
 	const di = Math.floor(Math.random() * G.nDoors);
 	const path = [];
+	// 地下は階段を下りてコンコースへ
+	if (isUnder()) path.push({ x: G.concX1 + 20, y: G.entryY, z: G.exitZ });
 	const j = pickGate();
 	if (j >= 0) {
 		const g = gatePos(j);
@@ -1341,10 +1447,10 @@ function pathIn(p) {
 	if (hasStairs()) {
 		const k = pickStair(p.plat);
 		const sz = stairZ(k);
-		path.push({ x: px, y: CFG.CONC_Y, z: sz - 10, res: 'stair', k: k });
+		path.push({ x: px, y: G.entryY, z: sz - (isBridge() ? 10 : -10), res: 'stair', k: k });
 		path.push({ x: px, y: CFG.PLAT_Y, z: sz + 2, climb: true });
 	} else {
-		path.push({ x: G.concX0 + 2, y: 0, z: G.crossZ });
+		path.push({ x: G.concX0 + 2, y: 0, z: G.crossZ, res: 'cross', qx: 1 });
 		path.push({ x: px, y: 0, z: G.crossZ });
 		path.push({ x: px, y: CFG.PLAT_Y, z: G.platZ1 - 3 });
 	}
@@ -1502,23 +1608,34 @@ function updatePax(dt) {
 		const node = p.path[p.pi];
 		if (!node) { R.pax.splice(i, 1); continue; }
 
-		// リソース(階段/改札)の取得
+		// リソース(階段/改札/構内踏切)の取得
 		if (node.res && !p.gotRes) {
-			const isStair = node.res === 'stair';
-			const pool = isStair ? R.stairFree[p.plat] : R.gateFree;
-			const idx = isStair ? node.k : node.j;
+			let pool, idx, hw;
+			if (node.res === 'stair') {
+				pool = R.stairFree[p.plat]; idx = node.k;
+				hw = S.esc ? CFG.ESC_HEADWAY : CFG.STAIR_HEADWAY;
+			} else if (node.res === 'cross') {
+				pool = R.crossFree; idx = 0;
+				hw = CFG.CROSS_HEADWAY;
+			} else {
+				pool = R.gateFree; idx = node.j;
+				hw = gateHeadway(node.j);
+			}
 			// 1エージェントが paxScale 人を表すので、占有時間もその分かかる
-			const hw = (isStair ? (S.esc ? CFG.ESC_HEADWAY : CFG.STAIR_HEADWAY)
-				: gateHeadway(node.j)) * R.paxScale;
-			const start = Math.max(pool[idx], R.now);
+			hw *= R.paxScale;
+			// 構内踏切は列車が抜けるまで開かない
+			const open = node.res === 'cross' ? R.crossOpenAt : 0;
+			const start = Math.max(pool[idx], R.now, open);
 			pool[idx] = start + hw;
 			p.gotRes = true;
 			p.until = start;
 			const ahead = Math.max(0, Math.ceil((start - R.now) / hw));
 			// 行列は来た方向へ伸ばす
-			const dz = p.dir === 0 ? -1 : 1;
-			p.sx = node.x;
-			p.sz = node.z + dz * Math.min(ahead * 0.75, 40);
+			const back = Math.min(ahead * 0.75, 40);
+			const qx = node.qx || 0;
+			const qz = node.qz !== undefined ? node.qz : (qx ? 0 : (p.dir === 0 ? -1 : 1));
+			p.sx = node.x + qx * back;
+			p.sz = node.z + qz * back;
 			if (start > R.now) { p.state = 'queue'; continue; }
 		}
 
@@ -1593,9 +1710,12 @@ function updateDemand(dt) {
 	// 満員なら1回も生成できないので、行き先の選定は生成できるときだけ行う
 	while (R.inQHead < R.inQ.length && R.pax.length < CFG.MAX_PAX) {
 		const track = pickBoardTrack();
-		const p = addPax(1, trackPlat(track), track,
-			G.concX0 + 2 + Math.random() * Math.max(1, (G.concX1 - G.concX0) - 4),
-			G.entryY, G.exitZ + 12, R.inQ[R.inQHead]);
+		const p = isUnder()
+			? addPax(1, trackPlat(track), track,
+				G.concX1 + 40 + Math.random() * 10, 0, G.exitZ + (Math.random() - 0.5) * 12, R.inQ[R.inQHead])
+			: addPax(1, trackPlat(track), track,
+				G.concX0 + 2 + Math.random() * Math.max(1, (G.concX1 - G.concX0) - 4),
+				G.entryY, G.exitZ + 12, R.inQ[R.inQHead]);
 		if (!p) break;
 		R.inQHead++;
 	}
@@ -1693,8 +1813,9 @@ function load() {
 		S.gateA = Math.max(0, Math.round(S.gateA));
 		S.gateM = Math.max(0, Math.round(S.gateM));
 		// 橋上駅舎が最初から在った頃のセーブは、建設済みとして引き継ぐ
-		if (typeof o.conc !== 'boolean') S.conc = true;
-		if (!S.conc && S.nPlat > 1) S.conc = true;
+		// 橋上駅舎が真偽値だった頃 / 最初から在った頃のセーブを引き継ぐ
+		if (typeof o.link !== 'number') S.link = (o.conc === false) ? 0 : 1;
+		if (S.link === 0 && S.nPlat > 1) S.link = 1;
 		return true;
 	} catch (e) { return false; }
 }
@@ -1711,20 +1832,29 @@ const UPGRADES = [
 		apply: () => { S.cars += 2; },
 	},
 	{
+		id: 'under', ic: '🕳', name: '地下道を建設',
+		desc: '線路の下をくぐる地下コンコースを掘り、改札を地下へ移す。'
+			+ '構内踏切が不要になり、ホームを2面以上に増やせる。安いが階段が深く、後の拡張は割高。',
+		cost: () => 5200000 + 900000 * S.nTrack,
+		can: () => !hasLink(),
+		ng: () => LINK_NAME[S.link] + '駅舎を建設済み',
+		apply: () => { S.link = 2; if (S.stairs < 1) S.stairs = 1; },
+	},
+	{
 		id: 'bridge', ic: '🌉', name: '橋上駅舎を建設',
-		desc: '線路をまたぐ駅舎を建て、改札を2階へ移す。ホームへは階段で下りる形になり、'
-			+ 'ホームを2面以上に増やせるようになる。',
-		cost: () => 9000000 + 1800000 * S.nTrack,
-		can: () => !S.conc,
-		ng: () => '建設済み',
-		apply: () => { S.conc = true; if (S.stairs < 1) S.stairs = 1; },
+		desc: '線路をまたぐ駅舎を建て、改札を2階へ移す。'
+			+ '構内踏切が不要になり、ホームを2面以上に増やせる。高いが明るく、拡張しやすい。',
+		cost: () => 9800000 + 1800000 * S.nTrack,
+		can: () => !hasLink(),
+		ng: () => LINK_NAME[S.link] + '駅舎を建設済み',
+		apply: () => { S.link = 1; if (S.stairs < 1) S.stairs = 1; },
 	},
 	{
 		id: 'stairs', ic: '🪜', name: '階段を増設',
 		desc: 'ホームとコンコースを結ぶ階段。少ないとホームに人が溜まる。',
-		cost: () => 700000 * Math.pow(1.9, S.stairs - 1) * S.nPlat,
-		can: () => S.conc && S.stairs < maxStairs(),
-		ng: () => !S.conc ? '橋上駅舎が必要'
+		cost: () => 700000 * Math.pow(1.9, S.stairs - 1) * S.nPlat * (isUnder() ? 1.5 : 1),
+		can: () => hasLink() && S.stairs < maxStairs(),
+		ng: () => !hasLink() ? '橋上駅舎か地下道が必要'
 			: (S.stairs < CFG.MAX_STAIRS ? 'ホームが短い(要延伸)' : '上限'),
 		apply: () => { S.stairs++; },
 	},
@@ -1767,8 +1897,8 @@ const UPGRADES = [
 		id: 'plat', ic: '🏗', name: 'ホームを増設',
 		desc: '島式ホームを1面追加。線路をさらに2本敷けるようになる。',
 		cost: () => 14000000 * Math.pow(1.55, S.nPlat - 1),
-		can: () => S.conc && S.nPlat < 10,
-		ng: () => !S.conc ? '橋上駅舎が必要' : '上限',
+		can: () => hasLink() && S.nPlat < 10,
+		ng: () => !hasLink() ? '橋上駅舎か地下道が必要' : '上限',
 		apply: () => { S.nPlat++; },
 	},
 	{
@@ -1920,7 +2050,7 @@ function updateUI(rdt) {
 	const gtxt = gateCount() === 0 ? ' 改札なし'
 		: ' 改札' + (S.gateM ? '手' + S.gateM : '') + (S.gateA ? '自' + S.gateA : '');
 	UI.clockBox.textContent = S.day + '日目 ' + String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0')
-		+ ' · ' + S.cars + '両 ' + S.nPlat + '面' + S.nTrack + '線' + gtxt;
+		+ ' · ' + LINK_NAME[S.link] + ' ' + S.cars + '両 ' + S.nPlat + '面' + S.nTrack + '線' + gtxt;
 	UI.moneyBox.textContent = yen(S.money);
 	UI.rankBox.textContent = RANKS[S.rank].name;
 	UI.paxBox.textContent = num(S.todayPax);
@@ -2007,6 +2137,20 @@ function renderPax() {
 	if (paxMesh.instanceColor) paxMesh.instanceColor.needsUpdate = true;
 }
 
+// 遮断桿の上げ下ろし。閉=水平、開=垂直
+function updateGateArms(rdt) {
+	if (!G.gateArms || !G.gateArms.length) return;
+	const target = R.crossClosed ? 0 : 1;
+	G.armT = G.armT === undefined ? target : G.armT + (target - G.armT) * Math.min(1, rdt * 2.2);
+	const a = G.armT * Math.PI / 2;      // 0=水平(閉) → π/2=垂直(開)
+	for (const g of G.gateArms) {
+		g.mesh.rotation.z = -g.s * a;
+		// 支点を軸に回るよう位置も合わせる
+		const half = 3.25;
+		g.mesh.position.set(g.px - g.s * half * Math.cos(a), 2.2 + half * Math.sin(a), g.z);
+	}
+}
+
 /* ================= メインループ ================= */
 function simulate(gameSeconds) {
 	let remain = gameSeconds;
@@ -2032,6 +2176,7 @@ function loop(now) {
 	if (R.speed > 0) simulate(rdt * R.speed);
 
 	renderPax();
+	updateGateArms(rdt);
 	updateSky();
 	updateUI(rdt);
 	controls.update();
