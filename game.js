@@ -22,7 +22,10 @@ const CFG = {
 		{ max: 1e9, rx: 1.8, ry: 5.0 },
 	],
 	WALK: 1.35,            // 歩行速度 m/s
-	GATE_HEADWAY: 1.6,     // 改札機1台が1人を通す秒数
+	GATE_M_HEADWAY: 2.8,   // 手動改札(駅員)1通路が1人を通す秒数
+	GATE_A_HEADWAY: 1.4,   // 自動改札1通路が1人を通す秒数
+	STAFF_WAGE: 42000,     // 駅員1人あたりの1日の人件費
+	NO_GATE_FARE: 0.55,    // 改札が1つも無いときに回収できる運賃の割合
 	STAIR_HEADWAY: 0.85,   // 階段1つが1人を通す秒数
 	ESC_HEADWAY: 0.42,     // エスカレーター
 	STAIR_CLIMB: 9,        // 階段を上り下りする秒数
@@ -69,7 +72,8 @@ function defaultState() {
 		platW: 6,             // ホーム幅
 		stairs: 1,            // 各ホームの階段数
 		esc: false,           // エスカレーター化
-		gates: 2,             // 改札機の台数
+		gateM: 0,             // 手動改札(駅員配置)の通路数
+		gateA: 0,             // 自動改札の通路数
 		concW: 0,             // コンコースの片側拡張幅
 		shops: 0,             // 駅ナカ店舗
 		todayPax: 0, todayRev: 0, todayCost: 0,
@@ -109,7 +113,7 @@ function recalcGeometry() {
 	G.platZ0 = -G.platLen / 2;
 	G.platZ1 = G.platLen / 2;
 	// 駅舎の大きさは駅の規模に合わせる。小駅に巨大な橋上駅舎が載らないように
-	G.concD = Math.max(20, Math.min(92, 12 + S.gates * 0.9 + G.platLen * 0.10));
+	G.concD = Math.max(20, Math.min(92, 12 + gateCount() * 0.9 + G.platLen * 0.10));
 	G.over = Math.min(G.concD * 0.55, Math.max(10, G.platLen * 0.32));
 	G.concZ0 = G.platZ1 - G.over;
 	G.concZ1 = G.concZ0 + G.concD;
@@ -141,13 +145,17 @@ function stairZ(k) {
 	return G.stairA + k * (G.stairB - G.stairA) / (S.stairs - 1);
 }
 // 改札機は横一列に並べ、コンコース幅を超えたら手前へ折り返す
-function gateCols() { return Math.max(4, Math.floor((G.concX1 - G.concX0 - 8) / 1.7)); }
+function gateCols() { return Math.max(4, Math.floor((G.concX1 - G.concX0 - 8) / 1.9)); }
+// 改札は手動を左端にまとめ、その右に自動を並べる
+function gateCount() { return S.gateM + S.gateA; }
+function gateIsManual(j) { return j < S.gateM; }
+function gateHeadway(j) { return gateIsManual(j) ? CFG.GATE_M_HEADWAY : CFG.GATE_A_HEADWAY; }
 function gatePos(j) {
 	const cols = gateCols();
 	const row = Math.floor(j / cols);
 	const col = j % cols;
-	const n = Math.min(S.gates - row * cols, cols);
-	return { x: G.concCx + (col - (n - 1) / 2) * 1.7, z: G.gateZ - row * 7 };
+	const n = Math.min(gateCount() - row * cols, cols);
+	return { x: G.concCx + (col - (n - 1) / 2) * 1.9, z: G.gateZ - row * 7 };
 }
 // ドア位置のZ (1両あたり2ドア)
 function doorZ(i) {
@@ -361,9 +369,7 @@ function initSky() {
 				gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
 			}`,
 		fragmentShader: `
-			#include <common>
-			#include <tonemapping_pars_fragment>
-			#include <encodings_pars_fragment>
+			// tonemapping/encodings の関数群は three が前置きするので include しない
 			uniform vec3 top; uniform vec3 bot; uniform vec3 sunCol;
 			uniform vec3 sunDir; uniform float sunAmt;
 			varying vec3 vDir;
@@ -560,6 +566,8 @@ function buildPalettes() {
 	}
 }
 
+let humanGeo = null;      // 乗客と駅員で共有する人型
+
 function initPaxMesh() {
 	buildPalettes();
 	dummy = new THREE.Object3D();
@@ -568,7 +576,7 @@ function initPaxMesh() {
 	body.translate(0, 0.59, 0);
 	const head = new THREE.SphereGeometry(0.145, 6, 5);
 	head.translate(0, 1.33, 0);
-	const geo = mergeGeos([body, head]);
+	const geo = humanGeo = mergeGeos([body, head]);
 	body.dispose(); head.dispose();
 
 	paxMesh = new THREE.InstancedMesh(geo,
@@ -616,6 +624,8 @@ function buildMaterials() {
 	MAT.handrail = std({ color: 0x9aa3ad, roughness: 0.35, metalness: 0.55 });
 	MAT.gate = std({ color: 0x2f3b4a, roughness: 0.5, metalness: 0.3 });
 	MAT.gateFlap = std({ color: 0x8fd8ff, roughness: 0.25, transparent: true, opacity: 0.55 });
+	MAT.desk = std({ color: 0x7a5a3a, roughness: 0.75 });          // 手動改札のラッチ台(木製)
+	MAT.staff = std({ color: 0x1d2b45, roughness: 0.8 });          // 駅員の制服
 	MAT.shop = std({ color: 0xc25a35, roughness: 0.8 });
 	MAT.pillar = std({ color: 0x9aa0a8, roughness: 0.85 });
 	MAT.glass = std({ color: 0x9fc6dd, roughness: 0.12, metalness: 0.1, transparent: true, opacity: 0.35 });
@@ -864,23 +874,39 @@ function buildStation() {
 	const gBodyGeo = new THREE.BoxGeometry(0.5, 1.0, 3.0);
 	const gTopGeo = new THREE.BoxGeometry(0.56, 0.1, 3.0);
 	const gFlapGeo = new THREE.BoxGeometry(0.08, 0.72, 0.9);
-	const gb = [], gt = [], gf = [];
-	for (let j = 0; j < S.gates; j++) {
+	const mDeskGeo = new THREE.BoxGeometry(0.7, 1.05, 3.0);       // 手動改札のラッチ台
+	const mPostGeo = new THREE.BoxGeometry(0.24, 2.3, 0.24);
+	const gb = [], gt = [], gf = [], md = [], mp = [], staff = [];
+	for (let j = 0; j < gateCount(); j++) {
 		const g = gatePos(j);
-		for (const s of [-1, 1]) {
-			gb.push([g.x + s * 0.85, CFG.CONC_Y + 0.5, g.z]);
-			gt.push([g.x + s * 0.85, CFG.CONC_Y + 1.05, g.z]);
-			gf.push([g.x + s * 0.55, CFG.CONC_Y + 0.36, g.z + 1.2]);
+		if (gateIsManual(j)) {
+			// 通路の両脇にラッチ台。片側に駅員が立つ
+			for (const s of [-1, 1]) {
+				md.push([g.x + s * 0.95, CFG.CONC_Y, g.z]);
+				mp.push([g.x + s * 0.95, CFG.CONC_Y, g.z - 1.6]);
+			}
+			staff.push([g.x + 1.55, CFG.CONC_Y, g.z - 0.4, 0, Math.PI, 0]);
+		} else {
+			for (const s of [-1, 1]) {
+				gb.push([g.x + s * 0.85, CFG.CONC_Y + 0.5, g.z]);
+				gt.push([g.x + s * 0.85, CFG.CONC_Y + 1.05, g.z]);
+				gf.push([g.x + s * 0.55, CFG.CONC_Y + 0.36, g.z + 1.2]);
+			}
 		}
 	}
 	addInstanced(gBodyGeo, MAT.gate, gb, stationGroup, true);
 	addInstanced(gTopGeo, MAT.lamp, gt, stationGroup, false);
 	addInstanced(gFlapGeo, MAT.gateFlap, gf, stationGroup, false);
+	addInstanced(mDeskGeo, MAT.desk, md, stationGroup, true);
+	addInstanced(mPostGeo, MAT.handrail, mp, stationGroup, true);
+	if (humanGeo) addInstanced(humanGeo, MAT.staff, staff, stationGroup, true);
 
-	// 改札の上の案内サイン(吊り下げ)
-	const sgW = Math.min(cw - 6, 3 + S.gates * 0.9);
-	box(sgW, 0.55, 0.12, MAT.sign, G.concCx, CFG.CONC_Y + 2.55, G.gateZ + 2.4, stationGroup, true);
-	box(sgW * 0.9, 0.34, 0.14, MAT.signFace, G.concCx, CFG.CONC_Y + 2.65, G.gateZ + 2.33, stationGroup, true);
+	// 改札の上の案内サイン(吊り下げ)。改札が無いうちは出さない
+	if (gateCount() > 0) {
+		const sgW = Math.min(cw - 6, 3 + gateCount() * 1.0);
+		box(sgW, 0.55, 0.12, MAT.sign, G.concCx, CFG.CONC_Y + 2.55, G.gateZ + 2.4, stationGroup, true);
+		box(sgW * 0.9, 0.34, 0.14, MAT.signFace, G.concCx, CFG.CONC_Y + 2.65, G.gateZ + 2.33, stationGroup, true);
+	}
 
 	/* ---- 駅ナカ店舗 / 券売機 ---- */
 	for (let s = 0; s < S.shops; s++) {
@@ -893,7 +919,7 @@ function buildStation() {
 	}
 	const vendGeo = new THREE.BoxGeometry(1.1, 1.9, 0.7);
 	const vends = [];
-	for (let i = 0; i < Math.min(6, 2 + S.gates / 8); i++) {
+	for (let i = 0; i < Math.min(6, 1 + gateCount() / 8); i++) {
 		vends.push([G.concX0 + 3, CFG.CONC_Y + 0.95, G.gateZ + 6 + i * 2.2]);
 	}
 	addInstanced(vendGeo, MAT.vend, vends, stationGroup, true);
@@ -1199,32 +1225,38 @@ function pathOut(p) {
 	const px = platX(p.plat);
 	const k = pickStair(p.plat);
 	const sz = stairZ(k);
-	const j = pickGate();
-	const g = gatePos(j);
-	return [
+	const path = [
 		{ x: px, y: CFG.PLAT_Y, z: sz + 2, res: 'stair', k: k },
 		{ x: px, y: CFG.CONC_Y, z: sz - 10, climb: true },
-		{ x: g.x, y: CFG.CONC_Y, z: g.z - 4, res: 'gate', j: j },
-		{ x: g.x, y: CFG.CONC_Y, z: g.z + 4 },
-		{ x: G.concCx + (Math.random() - 0.5) * 30, y: CFG.CONC_Y, z: G.exitZ + 12, exit: true },
 	];
+	// 改札が1つも無い無人駅では素通りする
+	const j = pickGate();
+	if (j >= 0) {
+		const g = gatePos(j);
+		path.push({ x: g.x, y: CFG.CONC_Y, z: g.z - 4, res: 'gate', j: j });
+		path.push({ x: g.x, y: CFG.CONC_Y, z: g.z + 4 });
+	}
+	path.push({ x: G.concCx + (Math.random() - 0.5) * 30, y: CFG.CONC_Y, z: G.exitZ + 12, exit: true });
+	return path;
 }
 
 function pathIn(p) {
 	const px = platX(p.plat);
 	const k = pickStair(p.plat);
 	const sz = stairZ(k);
-	const j = pickGate();
-	const g = gatePos(j);
 	const side = trackSide(p.track);
 	const di = Math.floor(Math.random() * G.nDoors);
-	return [
-		{ x: g.x, y: CFG.CONC_Y, z: g.z + 6, res: 'gate', j: j },
-		{ x: g.x, y: CFG.CONC_Y, z: g.z - 6 },
-		{ x: px, y: CFG.CONC_Y, z: sz - 10, res: 'stair', k: k },
-		{ x: px, y: CFG.PLAT_Y, z: sz + 2, climb: true },
-		{ x: px + side * (S.platW / 2 - 1.3), y: CFG.PLAT_Y, z: doorZ(di), board: true },
-	];
+	const path = [];
+	const j = pickGate();
+	if (j >= 0) {
+		const g = gatePos(j);
+		path.push({ x: g.x, y: CFG.CONC_Y, z: g.z + 6, res: 'gate', j: j });
+		path.push({ x: g.x, y: CFG.CONC_Y, z: g.z - 6 });
+	}
+	path.push({ x: px, y: CFG.CONC_Y, z: sz - 10, res: 'stair', k: k });
+	path.push({ x: px, y: CFG.PLAT_Y, z: sz + 2, climb: true });
+	path.push({ x: px + side * (S.platW / 2 - 1.3), y: CFG.PLAT_Y, z: doorZ(di), board: true });
+	return path;
 }
 
 function pickStair(plat) {
@@ -1236,9 +1268,11 @@ function pickStair(plat) {
 	return best;
 }
 function pickGate() {
-	let best = 0, bt = Infinity;
-	for (let j = 0; j < S.gates; j++) {
-		if (R.gateFree[j] < bt) { bt = R.gateFree[j]; best = j; }
+	let best = -1, bt = Infinity;
+	for (let j = 0; j < gateCount(); j++) {
+		// 待ち時間だけでなく処理の速さも見て、自動改札に寄るようにする
+		const eta = Math.max(R.gateFree[j], R.now) + gateHeadway(j);
+		if (eta < bt) { bt = eta; best = j; }
 	}
 	return best;
 }
@@ -1308,8 +1342,10 @@ function boardWaiting(tr, maxPeople) {
 
 function countPax(people) {
 	S.todayPax += people;
+	// 改札が無いと運賃を取りこぼす
+	const fare = CFG.FARE * (gateCount() > 0 ? 1 : CFG.NO_GATE_FARE);
 	// 運賃の駅取り分 + 駅ナカ店舗の売上(通行客の一部が買う)
-	const rev = people * CFG.FARE + people * S.shops * 6.2;
+	const rev = people * fare + people * S.shops * 6.2;
 	S.todayRev += rev;
 	S.money += rev;
 }
@@ -1377,7 +1413,8 @@ function updatePax(dt) {
 			const pool = isStair ? R.stairFree[p.plat] : R.gateFree;
 			const idx = isStair ? node.k : node.j;
 			// 1エージェントが paxScale 人を表すので、占有時間もその分かかる
-			const hw = (isStair ? (S.esc ? CFG.ESC_HEADWAY : CFG.STAIR_HEADWAY) : CFG.GATE_HEADWAY) * R.paxScale;
+			const hw = (isStair ? (S.esc ? CFG.ESC_HEADWAY : CFG.STAIR_HEADWAY)
+				: gateHeadway(node.j)) * R.paxScale;
 			const start = Math.max(pool[idx], R.now);
 			pool[idx] = start + hw;
 			p.gotRes = true;
@@ -1495,7 +1532,7 @@ function pickBoardTrack() {
 /* ================= 経済・日次 ================= */
 function dailyCost() {
 	return S.nPlat * (10000 + 3500 * S.cars) + 25000 * S.nTrack + 12000 * S.stairs * S.nPlat
-		+ 9000 * S.gates + 900 * S.concW + 55000 * S.shops
+		+ 9000 * S.gateA + CFG.STAFF_WAGE * S.gateM + 900 * S.concW + 55000 * S.shops
 		+ (S.esc ? 120000 : 0);
 }
 
@@ -1552,7 +1589,13 @@ function load() {
 		S.nPlat = Math.max(1, Math.min(10, Math.round(S.nPlat)));
 		S.nTrack = Math.max(1, Math.min(S.nPlat * 2, Math.round(S.nTrack)));
 		S.stairs = Math.max(1, Math.round(S.stairs));
-		S.gates = Math.max(2, Math.round(S.gates / 2) * 2);
+		// 改札が「最初から2台」だった頃のセーブは、その台数を自動改札とみなす
+		if (typeof o.gateA !== 'number' && typeof o.gates === 'number') {
+			S.gateA = Math.max(0, Math.round(o.gates));
+			S.gateM = 0;
+		}
+		S.gateA = Math.max(0, Math.round(S.gateA));
+		S.gateM = Math.max(0, Math.round(S.gateM));
 		return true;
 	} catch (e) { return false; }
 }
@@ -1585,12 +1628,23 @@ const UPGRADES = [
 		apply: () => { S.esc = true; },
 	},
 	{
-		id: 'gates', ic: '🎫', name: '改札機を増設 (+2)',
-		desc: '改札の通過待ち行列を短くする。1台=約1.6秒に1人。',
-		cost: () => 480000 * Math.pow(1.22, S.gates / 2 - 1),
-		can: () => S.gates < 240,
+		id: 'gateM', ic: '👮', name: '手動改札を1つ設置',
+		desc: () => '駅員が切符を切る通路。安く置けるが 約'
+			+ CFG.GATE_M_HEADWAY + '秒に1人と遅く、駅員の人件費が1日 '
+			+ yen(CFG.STAFF_WAGE) + ' かかる。現在 ' + S.gateM + '通路。',
+		cost: () => 260000 * Math.pow(1.12, S.gateM),
+		can: () => S.gateM < 40,
 		ng: () => '上限',
-		apply: () => { S.gates += 2; },
+		apply: () => { S.gateM++; },
+	},
+	{
+		id: 'gateA', ic: '🎫', name: '自動改札を1台設置',
+		desc: () => '約' + CFG.GATE_A_HEADWAY + '秒に1人と速く、維持費も安い。'
+			+ '初期費用は高い。現在 ' + S.gateA + '台。',
+		cost: () => 1900000 * Math.pow(1.10, S.gateA),
+		can: () => S.gateA < 220,
+		ng: () => '上限',
+		apply: () => { S.gateA++; },
 	},
 	{
 		id: 'track', ic: '🛤', name: '線路を増設',
@@ -1673,7 +1727,7 @@ function resetRuntimeForLayout() {
 	for (let i = 0; i < S.nPlat; i++) {
 		R.stairFree.push(new Array(CFG.MAX_STAIRS).fill(0));
 	}
-	R.gateFree = new Array(S.gates).fill(0);
+	R.gateFree = new Array(gateCount()).fill(0);
 	R.platCount = new Array(S.nPlat).fill(0);
 	R.waitN = new Array(Math.max(1, S.nTrack)).fill(0);
 	R.waitW = new Array(Math.max(1, S.nTrack)).fill(0);
@@ -1754,8 +1808,10 @@ function updateUI(rdt) {
 
 	const h = hourOfDay();
 	const hh = Math.floor(h), mm = Math.floor((h - hh) * 60);
+	const gtxt = gateCount() === 0 ? ' 改札なし'
+		: ' 改札' + (S.gateM ? '手' + S.gateM : '') + (S.gateA ? '自' + S.gateA : '');
 	UI.clockBox.textContent = S.day + '日目 ' + String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0')
-		+ ' · ' + S.cars + '両 ' + S.nPlat + '面' + S.nTrack + '線';
+		+ ' · ' + S.cars + '両 ' + S.nPlat + '面' + S.nTrack + '線' + gtxt;
 	UI.moneyBox.textContent = yen(S.money);
 	UI.rankBox.textContent = RANKS[S.rank].name;
 	UI.paxBox.textContent = num(S.todayPax);
@@ -1796,7 +1852,10 @@ function updateUI(rdt) {
 	// 詰まりの警告
 	if (waiting > 900) alertOnce('crowd', '⚠ ホームが大混雑 — 線路/ホームが足りません', false, 30);
 	const gq = R.gateFree.length ? Math.max.apply(null, R.gateFree) - R.now : 0;
-	if (gq > 90) alertOnce('gate', '⚠ 改札に長い行列 — 改札機を増設', false, 30);
+	if (gq > 90) alertOnce('gate', '⚠ 改札に長い行列 — 改札を増設', false, 30);
+	if (gateCount() === 0) {
+		alertOnce('nogate', '⚠ 改札が無く運賃を取りこぼしています', false, 90);
+	}
 	let sq = 0;
 	for (let i = 0; i < R.stairFree.length; i++) {
 		for (let k = 0; k < S.stairs; k++) sq = Math.max(sq, R.stairFree[i][k] - R.now);
@@ -1904,6 +1963,8 @@ function boot() {
 			return fetch('/__shot', { method: 'POST', body: url }).then(r => r.text());
 		},
 		reset: () => { noSave = true; localStorage.removeItem(SAVE_KEY); location.reload(); },
+		// S を直接いじった後に呼ぶ(レイアウト反映)
+		rebuild: () => { resetRuntimeForLayout(); buildStation(); renderUpgrades(); },
 		step: sec => {
 			for (let r = sec; r > 0; r -= 30) simulate(Math.min(30, r));
 			renderPax(); uiTick = 1; updateUI(0);
