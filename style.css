@@ -1,0 +1,146 @@
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+	height: 100%;
+	overflow: hidden;
+	background: #0f1622;
+	font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Noto Sans JP", sans-serif;
+	color: #e8eef7;
+	user-select: none;
+}
+
+#app { position: fixed; inset: 0; }
+
+/* ===== 上部HUD ===== */
+#topbar {
+	position: fixed; top: 0; left: 0; right: 0; z-index: 5;
+	padding: calc(env(safe-area-inset-top) + 6px) 10px 8px;
+	background: linear-gradient(180deg, rgba(11,17,27,.94) 60%, rgba(11,17,27,0));
+	pointer-events: none;
+}
+
+#topbar .row1 {
+	display: flex; align-items: center; gap: 8px;
+}
+#topbar .rank {
+	font-size: 13px; font-weight: 800; letter-spacing: .04em;
+	padding: 3px 9px; border-radius: 999px;
+	background: #1d61c4; color: #fff; white-space: nowrap;
+}
+#topbar .clock { font-size: 13px; opacity: .85; font-variant-numeric: tabular-nums; }
+#topbar .money {
+	margin-left: auto; font-size: 16px; font-weight: 800; color: #7ee0a0;
+	font-variant-numeric: tabular-nums;
+}
+
+#topbar .row2 { display: flex; gap: 4px; margin-top: 6px; }
+#topbar .stat {
+	flex: 1; text-align: center; background: rgba(255,255,255,.07);
+	border-radius: 7px; padding: 4px 2px;
+}
+#topbar .stat b {
+	display: block; font-size: 14px; font-weight: 800;
+	font-variant-numeric: tabular-nums; line-height: 1.2;
+}
+#topbar .stat span { font-size: 9px; opacity: .6; }
+
+#rankBar {
+	position: relative; margin-top: 6px; height: 14px;
+	background: rgba(255,255,255,.09); border-radius: 999px; overflow: hidden;
+}
+#rankBar i {
+	position: absolute; inset: 0 auto 0 0; width: 0%;
+	background: linear-gradient(90deg, #2f7de0, #58c6ff); transition: width .4s;
+}
+#rankBar span {
+	position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+	font-size: 9px; font-weight: 700; letter-spacing: .02em; text-shadow: 0 1px 2px rgba(0,0,0,.6);
+}
+
+/* ===== 速度 ===== */
+#speed {
+	position: fixed; right: 8px; top: calc(env(safe-area-inset-top) + 96px); z-index: 6;
+	display: flex; flex-direction: column; gap: 4px;
+}
+#speed button {
+	width: 40px; height: 32px; border: none; border-radius: 8px;
+	background: rgba(20,30,45,.85); color: #cfe0f5; font-size: 12px; font-weight: 700;
+}
+#speed button.active { background: #2f7de0; color: #fff; }
+
+/* ===== 警告トースト ===== */
+#alert {
+	position: fixed; left: 50%; transform: translateX(-50%);
+	top: calc(env(safe-area-inset-top) + 100px); z-index: 7;
+	display: flex; flex-direction: column; gap: 5px; align-items: center;
+	pointer-events: none; width: max-content; max-width: 90vw;
+}
+#alert div {
+	font-size: 11px; font-weight: 700; padding: 6px 12px; border-radius: 999px;
+	background: rgba(224,80,60,.92); color: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.4);
+	animation: pop .25s ease-out;
+}
+#alert div.good { background: rgba(40,160,100,.94); }
+@keyframes pop { from { opacity: 0; transform: translateY(-6px); } }
+
+/* ===== 下部ボタン ===== */
+#buildBtn, #logBtn {
+	position: fixed; bottom: calc(env(safe-area-inset-bottom) + 14px); z-index: 6;
+	border: none; border-radius: 999px; font-weight: 800; font-size: 14px;
+	padding: 12px 20px; box-shadow: 0 3px 12px rgba(0,0,0,.45);
+	font-family: inherit;
+}
+#buildBtn { right: 12px; background: #f0a020; color: #2a1c00; }
+#logBtn { left: 12px; background: rgba(30,42,60,.92); color: #cfe0f5; font-size: 12px; padding: 10px 14px; }
+#buildBtn:active, #logBtn:active { transform: scale(.96); }
+
+/* ===== シート ===== */
+#sheet, #logSheet {
+	position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+	max-height: 78vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+	background: #16202e; border-radius: 16px 16px 0 0;
+	padding: 12px 12px calc(env(safe-area-inset-bottom) + 16px);
+	box-shadow: 0 -4px 24px rgba(0,0,0,.5);
+	animation: rise .22s ease-out;
+}
+@keyframes rise { from { transform: translateY(100%); } }
+
+.sheetHead { display: flex; align-items: center; margin-bottom: 10px; }
+.sheetHead h2 { font-size: 15px; font-weight: 800; }
+.sheetHead button {
+	margin-left: auto; border: none; background: rgba(255,255,255,.1);
+	color: #e8eef7; width: 30px; height: 30px; border-radius: 8px; font-size: 14px;
+}
+
+.up {
+	display: flex; align-items: center; gap: 10px; width: 100%;
+	background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.07);
+	border-radius: 10px; padding: 10px; margin-bottom: 7px;
+	color: #e8eef7; font-family: inherit; text-align: left;
+}
+.up .ic { font-size: 22px; width: 28px; text-align: center; flex: none; }
+.up .tx { flex: 1; min-width: 0; }
+.up .tx b { display: block; font-size: 13px; font-weight: 800; }
+.up .tx span { display: block; font-size: 10px; opacity: .6; line-height: 1.4; margin-top: 1px; }
+.up .pr {
+	flex: none; font-size: 12px; font-weight: 800; color: #7ee0a0;
+	font-variant-numeric: tabular-nums; text-align: right;
+}
+.up:disabled { opacity: .42; }
+.up:disabled .pr { color: #ff8a7a; }
+.up:not(:disabled):active { background: rgba(255,255,255,.14); }
+
+.hint { font-size: 10px; opacity: .5; line-height: 1.6; margin: 8px 2px; }
+
+#resetBtn {
+	width: 100%; margin-top: 6px; padding: 9px; border: none; border-radius: 9px;
+	background: rgba(200,60,50,.22); color: #ff9a8a; font-size: 11px; font-weight: 700;
+	font-family: inherit;
+}
+
+#logList .rep {
+	background: rgba(255,255,255,.05); border-radius: 9px; padding: 9px 11px; margin-bottom: 7px;
+	font-size: 11px; line-height: 1.8;
+}
+#logList .rep b { font-size: 12px; color: #8fc4ff; }
+#logList .rep i { font-style: normal; float: right; font-variant-numeric: tabular-nums; }

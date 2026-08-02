@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>駅シム — 1面1線から新宿へ</title>
+<meta name="theme-color" content="#0f1622">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="駅シム">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="app"></div>
+
+<header id="topbar">
+	<div class="row1">
+		<div class="rank" id="rankBox">無人駅</div>
+		<div class="clock" id="clockBox">1日目 05:00</div>
+		<div class="money" id="moneyBox">¥200万</div>
+	</div>
+	<div class="row2">
+		<div class="stat"><b id="paxBox">0</b><span>本日乗降</span></div>
+		<div class="stat"><b id="waitBox">0</b><span>待機客</span></div>
+		<div class="stat"><b id="satBox">70</b><span>評判</span></div>
+		<div class="stat"><b id="townBox">1.0</b><span>街の発展</span></div>
+	</div>
+	<div id="rankBar"><i id="rankFill"></i><span id="rankNext">次: 小さな駅まで 2,000人/日</span></div>
+</header>
+
+<div id="speed">
+	<button data-speed="0">⏸</button>
+	<button data-speed="60" class="active">▶</button>
+	<button data-speed="240">▶▶</button>
+	<button data-speed="900">▶▶▶</button>
+</div>
+
+<div id="alert"></div>
+
+<button id="buildBtn">🏗 増築</button>
+<button id="logBtn">📋 日報</button>
+
+<section id="sheet" hidden>
+	<div class="sheetHead">
+		<h2>増築メニュー</h2>
+		<button id="sheetClose">✕</button>
+	</div>
+	<div id="upgrades"></div>
+	<p class="hint">ボトルネックは「階段」「改札」「線路」。どこが詰まっているかは駅を見れば分かります。</p>
+	<button id="resetBtn">はじめから（セーブ削除）</button>
+</section>
+
+<section id="logSheet" hidden>
+	<div class="sheetHead">
+		<h2>営業日報</h2>
+		<button id="logClose">✕</button>
+	</div>
+	<div id="logList"><p class="hint">1日の営業が終わると（毎朝4時）ここに日報が届きます。</p></div>
+</section>
+
+<script src="three.min.js"></script>
+<script src="OrbitControls.js"></script>
+<script src="game.js"></script>
+</body>
+</html>
