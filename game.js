@@ -8,9 +8,18 @@ const CFG = {
 	TRACK_W: 4.4,          // 線路1本が占める幅(m)
 	CAR_LEN: 20,           // 1両の長さ(m)
 	CARS_MIN: 2,
-	CARS_MAX: 16,
-	CAR_CAP: 150,          // 1両の定員
-	CAR_FLOW: 1.6,         // 1両あたりのドア扱い人数/秒
+	CARS_MAX: 15,          // 在来線の実際の上限(基本10両+付属5両)
+	CAR_CAP: 150,          // 1両の定員(ホーム側の目安。実際の定員は形式ごと)
+	CAR_FLOW: 1.6,         // 1両あたりのドア扱い人数/秒(同上)
+	TURN: 1200,            // 当駅で折り返して次のスジに就くまでの最短時間(秒)
+	SPAWN_LEAD: 40,        // 到着の何秒前に列車を投入するか
+	APPROACH_T: 14,        // 進入・退出にかかる秒数
+	APPROACH_LEN: 260,     // 進入・退出で走る距離(m)
+	OCC_IN: 30,            // 前の列車が抜けてから次が入線できるまで(秒)
+	HEAD_SAME: 120,        // 続行間隔: 同種別(秒)
+	HEAD_SLOW_FAST: 480,   // 続行間隔: 遅い種別の直後に速い種別(秒)
+	HEAD_FAST_SLOW: 120,   // 続行間隔: 速い種別の直後に遅い種別(秒)
+	ENTER_WINDOW: 2700,    // この先これだけの間に乗れるスジが無ければ客は入場しない(秒)
 	LOAD_ROOM: 0.35,       // 到着時に空いている定員の割合
 	ALIGHT_ROOM: 0.4,      // 降車1人につき空く席の割合
 	PLAT_Y: 1.1,           // ホーム面の高さ
@@ -53,6 +62,38 @@ const RANKS = [
 	{ name: '新宿級',          need: 3000000 },
 ];
 
+/* ================= 列車種別 =================
+   表定速度の差が待避の意味になる。速い種別ほど運賃取り分が大きい */
+const TYPES = [
+	{ id: 0, name: '普通', abbr: '普', col: 0x9aa3ad, fareMul: 1.00, kmh: 45, rank: 0 },
+	{ id: 1, name: '急行', abbr: '急', col: 0xe2903a, fareMul: 1.15, kmh: 65, rank: 2 },
+	{ id: 2, name: '特急', abbr: '特', col: 0xd8434f, fareMul: 1.60, kmh: 85, rank: 4 },
+];
+
+/* ================= 車両形式カタログ =================
+   cap/door は1両あたり。price/lease も1両あたり。
+   cars = 組める両数。fit = 就ける種別(不適合でも走れるが遅く、運賃倍率が普通扱いになる) */
+const MODELS = [
+	{ id: 'kiha40',   name: 'キハ40形',        cars: [1, 2],        cap: 110, door: 1.0, kmh: 85,  fit: [0],       price: 380000,  lease: 14000, band: 0x2f6f4a, rank: 0 },
+	{ id: 'mei6000',  name: '名鉄6000系',      cars: [2, 4, 6],     cap: 130, door: 1.4, kmh: 110, fit: [0, 1],    price: 620000,  lease: 21000, band: 0xd8006c, rank: 0 },
+	{ id: 'keio7000', name: '京王7000系',      cars: [6, 8, 10],    cap: 145, door: 1.7, kmh: 110, fit: [0, 1],    price: 1000000, lease: 26000, band: 0x2f8f6a, rank: 2 },
+	{ id: 'keio8000', name: '京王8000系',      cars: [8, 10],       cap: 150, door: 1.8, kmh: 110, fit: [0, 1],    price: 1250000, lease: 30000, band: 0xd8006c, rank: 3 },
+	{ id: 'mei2200',  name: '名鉄2200系',      cars: [6, 8],        cap: 120, door: 1.1, kmh: 120, fit: [1, 2],    price: 1900000, lease: 33000, band: 0xc03040, rank: 3 },
+	{ id: 'e231',     name: 'E231系',          cars: [10, 15],      cap: 155, door: 1.9, kmh: 120, fit: [0, 1],    price: 1450000, lease: 36000, band: 0x1f7ac0, rank: 4 },
+	{ id: 'e233',     name: 'E233系3000番台',  cars: [10, 15],      cap: 160, door: 2.0, kmh: 120, fit: [0, 1, 2], price: 1750000, lease: 40000, band: 0xe06010, rank: 5 },
+	{ id: 'keio5000', name: '京王5000系',      cars: [10],          cap: 125, door: 1.2, kmh: 120, fit: [1, 2],    price: 2400000, lease: 48000, band: 0x1f5fb0, rank: 5 },
+	{ id: 'ltd2',     name: '特急形(2階建)',   cars: [8, 10, 12],   cap: 100, door: 0.7, kmh: 160, fit: [2],       price: 3200000, lease: 60000, band: 0x6a4ac0, rank: 6 },
+];
+const MODEL = {};
+for (const m of MODELS) MODEL[m.id] = m;
+
+function modelOf(id) { return MODEL[id] || MODELS[0]; }
+function slotCap(mid, cars) { return cars * modelOf(mid).cap; }
+function slotFlow(mid, cars) { return cars * modelOf(mid).door; }
+function typeFits(mid, ty) { return modelOf(mid).fit.indexOf(ty) >= 0; }
+function contractPrice(mid, cars) { return modelOf(mid).price * cars; }
+function contractLease(mid, cars) { return modelOf(mid).lease * cars; }
+
 // 時間帯別の需要倍率 (0時〜23時)
 const HOURLY = [
 	0.06, 0.02, 0.00, 0.00, 0.10, 0.55, 1.45, 2.95, 3.10, 1.75,
@@ -81,7 +122,12 @@ function defaultState() {
 		gateA: 0,             // 自動改札の通路数
 		concW: 0,             // コンコースの片側拡張幅
 		shops: 0,             // 駅ナカ店舗
-		todayPax: 0, todayRev: 0, todayCost: 0,
+		// 契約している編成。1要素 = 形式×両数ごとの保有本数
+		fleet: [],            // [{m:'kiha40', cars:2, n:1}]
+		// パターンダイヤ。1行を展開して1日ぶんのスジになる
+		dia: [],              // [{id, m, cars, ty, track, from, to, every, off, dwell}] 分単位
+		diaId: 1,
+		todayPax: 0, todayRev: 0, todayCost: 0, todayLease: 0,
 		yesterdayPax: 0,
 		rank: 0,
 		log: [],
@@ -99,6 +145,13 @@ const R = {
 	inQ: [], inQHead: 0,  // 駅に入りきらない入場客(到着時刻のFIFO)
 	waitN: [1], waitW: [0], maxWaitW: 1,   // 線路ごとの待機客(全走査を避けるためのカウンタ)
 	crossFree: [0], crossOpenAt: 0, crossClosed: false,   // 構内踏切
+	sched: [],            // 検証済みスジ(spawn昇順)。これが実行の唯一の真実
+	depIdx: [],           // 発車昇順・2日ぶんの索引(番線選択と入場判定に使う)
+	schedCur: 0,          // 次に投入するスジ
+	trackBusy: [],        // 番線ごとに空く時刻
+	need: 0, short: 0,    // 所要編成数 / 不足数
+	issues: [],           // ダイヤの問題(UIで赤表示)
+	missAcc: [],          // 番線ごとの積み残し累計(満足度計算用)
 	stairFree: [],        // [plat][k] 階段が空く時刻
 	gateFree: [],         // 改札レーンが空く時刻
 	platCount: [],        // ホーム上の人数(混雑計算用)
@@ -156,6 +209,11 @@ function recalcGeometry() {
 	G.stairB = G.platZ1 - 4;
 	// 地平駅で線路を渡る構内踏切のZ
 	G.crossZ = G.platZ1 + 3;
+}
+
+// 延伸は+2両刻み。最後だけ+1両で15両(基本10両+付属5両)にする
+function nextCars() {
+	return S.cars + (S.cars + 2 > CFG.CARS_MAX ? 1 : 2);
 }
 
 // ホームへの動線。地平は構内踏切、橋上/地下は階段
@@ -1313,18 +1371,33 @@ function fitCamera() {
 	controls.update();
 }
 
-/* ================= 列車 ================= */
-function buildTrainMesh() {
-	const g = new THREE.Group();
+/* ================= 列車 =================
+   ジオメトリは両数に依存しないのでモジュールに1組だけ持つ */
+const TG = {};
+function trainGeos() {
+	if (TG.body) return TG;
 	const cl = CFG.CAR_LEN - 1.2;          // 連結部を空ける
-	const bodyGeo = new THREE.BoxGeometry(3.0, 2.6, cl);
-	const roofGeo = new THREE.BoxGeometry(2.86, 0.34, cl);
-	const skirtGeo = new THREE.BoxGeometry(2.8, 0.55, cl - 1.5);
-	const bogieGeo = new THREE.BoxGeometry(2.5, 0.7, 3.0);
+	TG.body = new THREE.BoxGeometry(3.0, 2.6, cl);
+	TG.roof = new THREE.BoxGeometry(2.86, 0.34, cl);
+	TG.skirt = new THREE.BoxGeometry(2.8, 0.55, cl - 1.5);
+	TG.bogie = new THREE.BoxGeometry(2.5, 0.7, 3.0);
+	TG.win = new THREE.BoxGeometry(3.04, 0.95, cl - 2.2);
+	TG.panto = new THREE.BoxGeometry(1.9, 0.12, 0.5);
+	TG.end = new THREE.BoxGeometry(2.9, 2.4, 0.4);
+	TG.cl = cl;
+	return TG;
+}
+
+// 編成中心を原点にしたローカル座標で組む。位置は mesh.position.z で与える
+function buildTrainMesh(cars, bandCol) {
+	const g = new THREE.Group();
+	const T = trainGeos();
+	const cl = T.cl;
+	const half = cars * CFG.CAR_LEN / 2;
 	const bodies = [], roofs = [], skirts = [], bogies = [], pantos = [];
 
-	for (let i = 0; i < S.cars; i++) {
-		const z = G.platZ0 + i * CFG.CAR_LEN + CFG.CAR_LEN / 2;
+	for (let i = 0; i < cars; i++) {
+		const z = -half + i * CFG.CAR_LEN + CFG.CAR_LEN / 2;
 		bodies.push([0, 2.35, z]);
 		roofs.push([0, 3.79, z]);
 		skirts.push([0, 0.85, z]);
@@ -1333,135 +1406,241 @@ function buildTrainMesh() {
 		if (i % 2 === 1) pantos.push([0, 4.05, z + 3]);
 	}
 	// 車体はテクスチャで窓とドアと帯を表現する
-	const body = addInstanced(bodyGeo, MAT.carSide, bodies, g, true);
+	const body = addInstanced(T.body, MAT.carSide, bodies, g, true);
 	if (body) body.receiveShadow = false;
-	addInstanced(roofGeo, MAT.carRoof, roofs, g, true);
-	addInstanced(skirtGeo, MAT.bogie, skirts, g, false);
-	addInstanced(bogieGeo, MAT.bogie, bogies, g, false);
+	addInstanced(T.roof, MAT.carRoof, roofs, g, true);
+	addInstanced(T.skirt, MAT.bogie, skirts, g, false);
+	addInstanced(T.bogie, MAT.bogie, bogies, g, false);
 	// 夜に光る窓(車体より少しだけ外側に重ねる)
-	const winGeo = new THREE.BoxGeometry(3.04, 0.95, cl - 2.2);
-	const win = addInstanced(winGeo, MAT.carWin, bodies.map(b => [b[0], b[1] + 0.5, b[2]]), g, false);
+	const win = addInstanced(T.win, MAT.carWin, bodies.map(b => [b[0], b[1] + 0.5, b[2]]), g, false);
 	if (win) win.receiveShadow = false;
-	// パンタグラフ
-	const pGeo = new THREE.BoxGeometry(1.9, 0.12, 0.5);
-	addInstanced(pGeo, MAT.panto, pantos, g, false);
+	addInstanced(T.panto, MAT.panto, pantos, g, false);
 
 	// 先頭部の前面
-	box(2.9, 2.4, 0.4, MAT.carEnd, 0, 2.4, G.platZ0 + 0.3, g, true);
-	box(2.9, 2.4, 0.4, MAT.carEnd, 0, 2.4, G.platZ1 - 0.3, g, true);
+	const e1 = new THREE.Mesh(T.end, MAT.carEnd); e1.position.set(0, 3.6, -half + 0.3); e1.castShadow = true; g.add(e1);
+	const e2 = new THREE.Mesh(T.end, MAT.carEnd); e2.position.set(0, 3.6, half - 0.3); e2.castShadow = true; g.add(e2);
 	return g;
 }
 
 // 列車が場外に待避する距離
-function trainOffZ() { return G.platLen / 2 + 220; }
+function trainOffZ() { return G.platLen / 2 + CFG.APPROACH_LEN + 40; }
 
-function spawnTrain(track) {
-	const mesh = buildTrainMesh();
-	mesh.position.x = trackX(track);
-	mesh.position.z = -trainOffZ();
-	trainGroup.add(mesh);
-	R.trains.push({
-		track, mesh, phase: 'approach', z: -trainOffZ(),
-		dwell: 0, room: 0, boardAcc: 0, alightLeft: 0, cars: S.cars,
-	});
+// 停止位置(編成中心)。ホーム北端=改札寄りに前を揃える
+function stopZOf(cars) { return G.platZ1 - cars * CFG.CAR_LEN / 2; }
+
+// 停止位置からのオフセットを返す純関数。900倍速でサブステップが飛んでも行き過ぎない
+function trainOffset(tr, now) {
+	if (now < tr.tArr) {
+		const u = Math.min(1, (tr.tArr - now) / CFG.APPROACH_T);
+		return -CFG.APPROACH_LEN * u * u;
+	}
+	if (now < tr.tDep) return 0;
+	const u = (now - tr.tDep) / CFG.APPROACH_T;
+	return CFG.APPROACH_LEN * u * u;
 }
 
-function trainHeadway() {
-	// ランクが上がるほど増発される。短い編成はローカル運用なので本数も少ない
-	const base = Math.max(180, 900 - S.rank * 90);
-	const carFactor = 1 + (CFG.CARS_MAX - S.cars) / CFG.CARS_MAX * 0.5;
-	return base * carFactor;
+function launchTrain(e) {
+	const tr = {
+		dia: e.dia, track: e.track, cars: e.cars, mid: e.m, ty: e.ty,
+		tArr: R.now + (e.arr - S.t), tDep: R.now + (e.dep - S.t),
+		cap: e.cap, flow: e.flow, fare: e.fare,
+		room: 0, boardAcc: 0, alightLeft: 0,
+		arrived: false, gone: false, mesh: null, late: 0,
+	};
+	// 前の列車が抜けていなければ場内で待たされる(遅延)
+	const busy = R.trackBusy[e.track] || 0;
+	if (busy > tr.tArr - CFG.OCC_IN) {
+		const push = busy + CFG.OCC_IN - tr.tArr;
+		tr.tArr += push; tr.tDep += push; tr.late = push;
+	}
+	R.trackBusy[e.track] = tr.tDep + CFG.OCC_IN;
+	R.trains.push(tr);
+}
+
+function attachTrainMesh(tr) {
+	const m = modelOf(tr.mid);
+	tr.mesh = buildTrainMesh(tr.cars, m.band);
+	tr.mesh.position.set(trackX(tr.track), 0, stopZOf(tr.cars));
+	trainGroup.add(tr.mesh);
+}
+
+/* ================= ダイヤ =================
+   S.dia(パターン)を展開して R.sched(検証済みスジ)を作る。
+   実行・乗客の指名・UIの表示は、すべてこの1本のリストだけを見る */
+
+function fleetHave(mid, cars) {
+	const f = S.fleet.find(x => x.m === mid && x.cars === cars);
+	return f ? f.n : 0;
+}
+
+// 続行間隔: 遅い種別の直後に速い種別を出すと大きく空ける必要がある
+function headwayFor(prevTy, nextTy) {
+	if (prevTy === nextTy) return CFG.HEAD_SAME;
+	return TYPES[nextTy].kmh > TYPES[prevTy].kmh ? CFG.HEAD_SLOW_FAST : CFG.HEAD_FAST_SLOW;
+}
+
+function compileSched() {
+	const out = [];
+	const issues = [];
+
+	// 1. パターンを展開
+	for (const d of S.dia) {
+		if (d.every <= 0 || d.to <= d.from) continue;
+		const model = modelOf(d.m);
+		const bad = [];
+		if (d.cars > S.cars) bad.push('ホーム有効長' + S.cars + '両では' + d.cars + '両は着けられない');
+		if (d.track >= S.nTrack) bad.push((d.track + 1) + '番線が無い');
+		if (fleetHave(d.m, d.cars) === 0) bad.push('未契約');
+		if (bad.length) { issues.push({ dia: d.id, msg: bad.join(' / ') }); continue; }
+		for (let mn = d.from + (d.off || 0); mn < d.to; mn += d.every) {
+			const arr = mn * 60;
+			const dep = arr + Math.max(15, d.dwell) ;
+			out.push({
+				dia: d.id, m: d.m, cars: d.cars, ty: d.ty, track: d.track,
+				arr: arr, dep: dep, spawn: arr - CFG.SPAWN_LEAD,
+				cap: slotCap(d.m, d.cars), flow: slotFlow(d.m, d.cars),
+				fare: typeFits(d.m, d.ty) ? TYPES[d.ty].fareMul : 1.0,
+				fits: typeFits(d.m, d.ty),
+				ok: true,
+			});
+		}
+	}
+
+	out.sort((a, b) => a.dep - b.dep);
+
+	// 2. 検証: 同一番線の重複と、駅の外(単線・追い越し不可)の続行間隔
+	const lastOnTrack = [];
+	for (let i = 0; i < out.length; i++) {
+		const s = out[i];
+		const prevT = lastOnTrack[s.track];
+		if (prevT !== undefined && s.arr < prevT.dep + CFG.OCC_IN) {
+			s.ok = false;
+			issues.push({ dia: s.dia, at: s.arr, msg: (s.track + 1) + '番線が塞がっている' });
+		} else lastOnTrack[s.track] = s;
+		// 発車順は全番線で共通(追い越しは駅の外では起きない)
+		if (i > 0) {
+			const p = out[i - 1];
+			const need = headwayFor(p.ty, s.ty);
+			if (s.dep - p.dep < need) {
+				s.ok = false;
+				issues.push({ dia: s.dia, at: s.dep, msg: TYPES[p.ty].name + 'の' + Math.round(need / 60) + '分後まで' + TYPES[s.ty].name + 'は発車できない' });
+			}
+		}
+	}
+
+	const live = out.filter(s => s.ok);
+
+	// 3. 所要編成数(同時に線路上に居る本数の最大)をスイープラインで求める
+	const ev = [];
+	for (const s of live) { ev.push([s.arr - CFG.SPAWN_LEAD, 1]); ev.push([s.dep + CFG.TURN, -1]); }
+	ev.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+	let cur = 0, peak = 0;
+	for (const e of ev) { cur += e[1]; if (cur > peak) peak = cur; }
+	R.need = peak;
+	R.have = S.fleet.reduce((a, f) => a + f.n, 0);
+	R.short = Math.max(0, peak - R.have);
+
+	R.sched = live.slice().sort((a, b) => a.spawn - b.spawn);
+	R.schedCur = 0;
+	while (R.schedCur < R.sched.length && R.sched[R.schedCur].spawn <= S.t) R.schedCur++;
+
+	// 4. 発車昇順・2日ぶんの索引(日跨ぎで客が待てるように)
+	R.depIdx = live.map(s => s).concat(live.map(s => ({ ...s, arr: s.arr + 86400, dep: s.dep + 86400, spawn: s.spawn + 86400 })));
+	R.depIdx.sort((a, b) => a.dep - b.dep);
+
+	R.issues = issues;
+	R.trackBusy = new Array(Math.max(1, S.nTrack)).fill(0);
+}
+
+// この先しばらくの間に、その番線から乗れるスジがあるか
+function nextDepOn(track, fromT) {
+	for (let i = 0; i < R.depIdx.length; i++) {
+		const s = R.depIdx[i];
+		if (s.dep >= fromT && s.track === track) return s;
+	}
+	return null;
 }
 
 function updateTrains(dt) {
-	// 発車→次の列車の生成
-	for (let t = 0; t < S.nTrack; t++) {
-		if (!R.trackTimer) R.trackTimer = [];
-		if (R.trackTimer[t] === undefined) R.trackTimer[t] = t * 40;
-		R.trackTimer[t] -= dt;
-		const busy = R.trains.some(tr => tr.track === t);
-		if (R.trackTimer[t] <= 0 && !busy) {
-			R.trackTimer[t] = trainHeadway();
-			spawnTrain(t);
-		}
+	// スジの投入。単調カーソルなので1ステップに複数入っても取りこぼさない
+	while (R.schedCur < R.sched.length && R.sched[R.schedCur].spawn <= S.t) {
+		launchTrain(R.sched[R.schedCur++]);
 	}
 
+	const now = R.now;
 	for (let i = R.trains.length - 1; i >= 0; i--) {
 		const tr = R.trains[i];
-		if (tr.phase === 'approach') {
-			tr.z += 42 * dt;
-			if (tr.z >= 0) {
-				tr.z = 0;
-				tr.phase = 'dwell';
-				tr.dwell = 0;
-				// 降車客を確定。混んだ編成が入ってきて、降りた分だけ空く
-				const cap = G.trainCap;
-				const n = Math.min(R.outPool, cap);
-				R.outPool -= n;
-				tr.alightLeft = n;
-				tr.room = Math.min(cap, cap * CFG.LOAD_ROOM + n * CFG.ALIGHT_ROOM);
-			}
-		} else if (tr.phase === 'dwell') {
-			tr.dwell += dt;
-			// 降車
+
+		if (!tr.mesh && now >= tr.tArr - CFG.APPROACH_T) attachTrainMesh(tr);
+
+		// 到着: 降車客を確定し、空き容量を決める
+		if (!tr.arrived && now >= tr.tArr) {
+			tr.arrived = true;
+			const n = Math.min(R.outPool, tr.cap);
+			R.outPool -= n;
+			tr.alightLeft = n;
+			tr.room = Math.min(tr.cap, tr.cap * CFG.LOAD_ROOM + n * CFG.ALIGHT_ROOM);
+		}
+
+		// 停車中: 降車と乗車
+		if (tr.arrived && !tr.gone && now < tr.tDep) {
 			if (tr.alightLeft > 0) {
-				const n = Math.min(tr.alightLeft, G.doorFlow * dt);
+				const n = Math.min(tr.alightLeft, tr.flow * dt);
 				tr.alightLeft -= n;
 				spawnAlighted(tr, n);
 			}
-			// 乗車。エージェント粒度(1体=paxScale人)でも平均レートがドア扱い量に一致するよう、
-			// 積み残した端数を列車ごとに繰り越す
 			if (tr.room > 0) {
-				// 上限は「待っている中で最も重いエージェント」まで許す。
-				// paxScale が下がった後に古い重いエージェントが永久に乗れなくなるのを防ぐ
-				tr.boardAcc = Math.min(tr.boardAcc + G.doorFlow * dt,
-					G.doorFlow * dt + Math.max(R.paxScale, R.maxWaitW));
-				const take = Math.min(tr.boardAcc, tr.room);
-				const got = boardWaiting(tr, take);
+				// 1体=paxScale人でも平均レートがドア扱い量に一致するよう端数を繰り越す
+				tr.boardAcc = Math.min(tr.boardAcc + tr.flow * dt,
+					tr.flow * dt + Math.max(R.paxScale, R.maxWaitW));
+				const got = boardWaiting(tr, Math.min(tr.boardAcc, tr.room));
 				tr.boardAcc -= got;
 				tr.room -= got;
 			}
-			const stillWaiting = countWaiting(tr.track) > 0 && tr.room > 0;
-			const done = tr.alightLeft <= 0.01 && !stillWaiting && tr.dwell >= CFG.DWELL_MIN;
-			if (done || tr.dwell >= CFG.DWELL_MAX) {
-				tr.phase = 'depart';
-				if (tr.dwell > CFG.DWELL_MIN + 25) {
-					// 停車時間超過 = 遅延。評判に直接効かせる
+		}
+
+		// 発車: 乗車は定刻で打ち切る(=積み残し)。降車未了だけが遅延
+		if (!tr.gone && now >= tr.tDep) {
+			if (tr.alightLeft > 0.5) {
+				tr.tDep = now + tr.alightLeft / Math.max(0.1, tr.flow);
+				if (!tr.lateWarn) {
+					tr.lateWarn = true;
 					S.rep = Math.max(0, S.rep - 0.05);
-					alertOnce('delay', '停車時間超過 — 遅延発生', false, 40);
+					alertOnce('delay', '⚠ 降車が終わらず遅延 — 停車時間が短すぎます', false, 30);
+				}
+			} else {
+				tr.gone = true;
+				const left = waitingFor(tr.track);
+				if (left > 0) {
+					R.missAcc[tr.track] = (R.missAcc[tr.track] || 0) + left;
+					if (left > tr.cap * 0.15) {
+						alertOnce('left', '⚠ 積み残し — 停車時間か本数が足りません', false, 30);
+					}
 				}
 			}
-		} else {
-			tr.z += 40 * dt;
-			if (tr.z > trainOffZ()) {
-				trainGroup.remove(tr.mesh);
-				tr.mesh.traverse(o => { if (o.geometry) o.geometry.dispose(); });
-				R.trains.splice(i, 1);
-				continue;
-			}
 		}
-		tr.mesh.position.z = tr.z;
+
+		if (tr.mesh) tr.mesh.position.z = stopZOf(tr.cars) + trainOffset(tr, now);
+		if (tr.gone && trainOffset(tr, now) > CFG.APPROACH_LEN) {
+			// ジオメトリは全編成で共有しているので破棄しない
+			if (tr.mesh) trainGroup.remove(tr.mesh);
+			R.trains.splice(i, 1);
+		}
 	}
 
-	// 構内踏切は列車が抜けきるまで閉じる。いつ開くかを見積もっておく
+	// 構内踏切は列車が抜けきるまで閉じる。スジから直接見積もる
 	let block = 0;
 	if (S.link === 0) {
-		const clearLen = G.platLen / 2 + 60;
 		for (const tr of R.trains) {
-			let rem;
-			if (tr.phase === 'approach') {
-				const toStop = -tr.z / 42;
-				if (toStop > CFG.CROSS_WARN) continue;     // まだ遠いので開けておく
-				rem = toStop + CFG.DWELL_MIN + clearLen / 40 + CFG.CROSS_CLEAR;
-			} else if (tr.phase === 'dwell') {
-				rem = Math.max(0, CFG.DWELL_MIN - tr.dwell) + clearLen / 40 + CFG.CROSS_CLEAR;
-			} else {
-				rem = Math.max(0, (clearLen - tr.z) / 40) + CFG.CROSS_CLEAR;
+			if (tr.gone) {
+				const done = tr.tDep + CFG.APPROACH_T + CFG.CROSS_CLEAR;
+				if (done > now) block = Math.max(block, done - now);
+			} else if (now >= tr.tArr - CFG.CROSS_WARN) {
+				block = Math.max(block, tr.tDep + CFG.APPROACH_T + CFG.CROSS_CLEAR - now);
 			}
-			block = Math.max(block, rem);
 		}
 	}
-	R.crossOpenAt = R.now + block;
+	R.crossOpenAt = now + block;
 	R.crossClosed = block > 0;
 }
 
@@ -1579,11 +1758,12 @@ function spawnAlighted(tr, n) {
 			platX(plat) + side * (S.platW / 2 - 1.0),
 			CFG.PLAT_Y, doorZ(di));
 	}
-	countPax(n);
+	countPax(n, tr.fare * TYPES[tr.ty].fareMul);
 }
 
 // 線路ごとの待機客はカウンタで持つ(毎回 R.pax を全走査すると高速再生で潰れる)
 function countWaiting(track) { return R.waitN[track] || 0; }
+function waitingFor(track) { return R.waitW[track] || 0; }
 
 function recountWaiting() {
 	R.waitN = new Array(Math.max(1, S.nTrack)).fill(0);
@@ -1600,9 +1780,12 @@ function recountWaiting() {
 
 function boardWaiting(tr, maxPeople) {
 	let took = 0;
+	const miss = R.missAcc[tr.track] || 0;
 	for (let i = R.pax.length - 1; i >= 0; i--) {
 		const p = R.pax[i];
 		if (p.state !== 'waitTrain' || p.track !== tr.track) continue;
+		// この客がホームに着いてから何本見送ったか
+		p.missed = Math.max(0, miss - (p.missAt || 0));
 		// 1エージェント = p.w 人。人数で先に判定しないとドア扱い量を超える
 		if (took + p.w > maxPeople) break;
 		finishPax(p);
@@ -1610,14 +1793,14 @@ function boardWaiting(tr, maxPeople) {
 		R.waitN[p.track]--; R.waitW[p.track] -= p.w;
 		took += p.w;
 	}
-	countPax(took);
+	countPax(took, tr.fare * TYPES[tr.ty].fareMul);
 	return took;
 }
 
-function countPax(people) {
+function countPax(people, mul) {
 	S.todayPax += people;
-	// 改札が無いと運賃を取りこぼす
-	const fare = CFG.FARE * (gateCount() > 0 ? 1 : CFG.NO_GATE_FARE);
+	// 改札が無いと運賃を取りこぼす。種別によって取り分が変わる
+	const fare = CFG.FARE * (gateCount() > 0 ? 1 : CFG.NO_GATE_FARE) * (mul === undefined ? 1 : mul);
 	// 運賃の駅取り分 + 駅ナカ店舗の売上(通行客の一部が買う)
 	const rev = people * fare + people * S.shops * 6.2;
 	S.todayRev += rev;
@@ -1628,10 +1811,11 @@ function finishPax(p) {
 	// 駅内滞在時間から満足度を算出。
 	// ただし乗車客が「次の列車を待つ」時間は駅のせいではないので除き、
 	// 1本乗り遅れた分(積み残し)だけを罰する。運行間隔の不便さは軽い係数で反映。
+	// ダイヤは自分で組むので、列車待ちもプレイヤーの責任。
+	// ただし歩行や行列より軽く見る(0.45)。積み残された回数は重く罰する
 	let dur;
 	if (p.dir === 1 && p.readyAt !== undefined) {
-		const hw = trainHeadway();
-		dur = (p.readyAt - p.born) + Math.max(0, (R.now - p.readyAt) - hw) + hw * 0.075;
+		dur = (p.readyAt - p.born) + 0.45 * (R.now - p.readyAt) + (p.missed || 0) * 240;
 	} else {
 		dur = R.now - p.born;
 	}
@@ -1719,7 +1903,11 @@ function updatePax(dt) {
 			p.gotRes = false;
 			if (node.exit) { finishPax(p); R.pax.splice(i, 1); continue; }
 			if (node.board) {
+				// ホームに着いた時点で番線を選び直す。歩いている間に列車が出ていることがある
+				const best = pickBoardTrack();
+				if (best >= 0 && best !== p.track && trackPlat(best) === p.plat) p.track = best;
 				p.state = 'waitTrain'; p.readyAt = R.now;
+				p.missAt = R.missAcc[p.track] || 0;   // 積み残しの基準点
 				R.waitN[p.track]++; R.waitW[p.track] += p.w;
 				if (p.w > R.maxWaitW) R.maxWaitW = p.w;
 				continue;
@@ -1770,21 +1958,33 @@ function demandPerSec() {
 }
 
 function updateDemand(dt) {
+	// この先しばらくに乗れるスジが1本も無ければ、そもそも客は駅に来ない。
+	// 白紙スタートで「列車が無ければ客も来ない」を成立させる
+	let served = false;
+	for (let t = 0; t < S.nTrack && !served; t++) {
+		const s = nextDepOn(t, S.t);
+		if (s && s.dep - S.t <= CFG.ENTER_WINDOW) served = true;
+	}
+
 	const d = demandPerSec();
 	// エージェント数が上限に近づいたら1人=N人にスケール
 	const want = Math.ceil(d * 220 / CFG.MAX_PAX);
 	R.paxScale = Math.max(1, want);
 
-	// 降車客は列車が運んでくる
-	R.outPool += d * 0.5 * dt;
+	// 降車客は列車が運んでくる。運んでくる列車が無いなら溜めない
+	if (served) R.outPool += d * 0.5 * dt;
+	R.outPool = Math.min(R.outPool, CFG.CAR_CAP * CFG.CARS_MAX * 3);
 
 	// 入場客は駅前から入ってくる。駅が飽和していたら外で待たされる(入場規制)
-	R.inAccum += d * 0.5 * dt / R.paxScale;
-	while (R.inAccum >= 1) { R.inAccum -= 1; R.inQ.push(R.now); }
+	if (served) {
+		R.inAccum += d * 0.5 * dt / R.paxScale;
+		while (R.inAccum >= 1) { R.inAccum -= 1; R.inQ.push(R.now); }
+	}
 
 	// 満員なら1回も生成できないので、行き先の選定は生成できるときだけ行う
 	while (R.inQHead < R.inQ.length && R.pax.length < CFG.MAX_PAX) {
 		const track = pickBoardTrack();
+		if (track < 0) break;
 		const p = isUnder()
 			? addPax(1, trackPlat(track), track,
 				G.concX1 + 40 + Math.random() * 10, 0, G.exitZ + (Math.random() - 0.5) * 12, R.inQ[R.inQHead])
@@ -1811,11 +2011,13 @@ function updateDemand(dt) {
 }
 
 function pickBoardTrack() {
-	// 待機客が最も少ない線路を選ぶ
-	let best = 0, bn = Infinity;
+	// 次に発車するスジが最も早い番線を選ぶ。同着なら空いている方
+	let best = -1, bt = Infinity;
 	for (let t = 0; t < S.nTrack; t++) {
-		const n = countWaiting(t);
-		if (n < bn) { bn = n; best = t; }
+		const s = nextDepOn(t, S.t + 60);
+		if (!s) continue;
+		const eta = s.dep + countWaiting(t) * 0.01;
+		if (eta < bt) { bt = eta; best = t; }
 	}
 	return best;
 }
@@ -1824,7 +2026,14 @@ function pickBoardTrack() {
 function dailyCost() {
 	return S.nPlat * (10000 + 3500 * S.cars) + 25000 * S.nTrack + 12000 * S.stairs * S.nPlat
 		+ 9000 * S.gateA + CFG.STAFF_WAGE * S.gateM + 900 * S.concW + 55000 * S.shops
-		+ (S.esc ? 120000 : 0);
+		+ (S.esc ? 120000 : 0) + fleetLease();
+}
+
+// 契約している編成のリース料(1日)
+function fleetLease() {
+	let n = 0;
+	for (const f of S.fleet) n += contractLease(f.m, f.cars) * f.n;
+	return n;
 }
 
 function endOfDay() {
@@ -1845,7 +2054,8 @@ function endOfDay() {
 
 	S.log.unshift({
 		day: S.day, pax: Math.round(S.todayPax), rev: Math.round(S.todayRev),
-		cost: cost, sat: Math.round(sat), town: S.town, rank: RANKS[S.rank].name,
+		cost: cost, lease: fleetLease(), sat: Math.round(sat), town: S.town,
+		rank: RANKS[S.rank].name, trains: R.sched.length,
 	});
 	if (S.log.length > 40) S.log.length = 40;
 
@@ -1856,6 +2066,9 @@ function endOfDay() {
 	S.day++;
 	S.todayPax = 0; S.todayRev = 0;
 	R.satSum = 0; R.satN = 0;
+	R.missAcc = new Array(Math.max(1, S.nTrack)).fill(0);
+	// S.t が巻き戻るのでスジのカーソルを先頭に戻す
+	compileSched();
 	save();
 	renderLog();
 }
@@ -1876,7 +2089,12 @@ function load() {
 		// 編成長が可変になる前のセーブはホーム固定10両だった。
 		// 補完しないと defaultState() の2両に落ちて輸送力が数分の1になる
 		if (typeof o.cars !== 'number') S.cars = 10;
-		S.cars = Math.max(CFG.CARS_MIN, Math.min(CFG.CARS_MAX, Math.round(S.cars / 2) * 2));
+		S.cars = Math.max(CFG.CARS_MIN, Math.min(CFG.CARS_MAX, Math.round(S.cars)));
+		// 契約・ダイヤが無かった頃のセーブは白紙で始める
+		if (!Array.isArray(S.fleet)) S.fleet = [];
+		if (!Array.isArray(S.dia)) S.dia = [];
+		S.diaId = Math.max(1, S.diaId | 0);
+		for (const d of S.dia) if (d.id >= S.diaId) S.diaId = d.id + 1;
 		S.nPlat = Math.max(1, Math.min(10, Math.round(S.nPlat)));
 		S.nTrack = Math.max(1, Math.min(S.nPlat * 2, Math.round(S.nTrack)));
 		S.stairs = Math.max(0, Math.round(S.stairs));
@@ -1898,13 +2116,14 @@ function load() {
 /* ================= 増築 ================= */
 const UPGRADES = [
 	{
-		id: 'cars', ic: '📏', name: 'ホームを延伸 (+2両)',
-		desc: () => 'ホーム有効長 ' + S.cars + '両 → ' + (S.cars + 2) + '両。'
-			+ '1本の列車で運べる人数が ' + (S.cars * CFG.CAR_CAP) + '人 → ' + ((S.cars + 2) * CFG.CAR_CAP) + '人 になる。',
+		id: 'cars', ic: '📏', name: 'ホームを延伸',
+		desc: () => 'ホーム有効長 ' + S.cars + '両 → ' + nextCars() + '両。'
+			+ (nextCars() === 15 ? '基本10両+付属5両が着けられるようになる。' : '')
+			+ 'より長い編成を契約できるようになる。',
 		cost: () => 2200000 * Math.pow(1.42, (S.cars - CFG.CARS_MIN) / 2) * S.nPlat,
 		can: () => S.cars < CFG.CARS_MAX,
 		ng: () => CFG.CARS_MAX + '両が上限',
-		apply: () => { S.cars += 2; },
+		apply: () => { S.cars = nextCars(); },
 	},
 	{
 		id: 'under', ic: '🕳', name: '地下道を建設',
@@ -2058,14 +2277,12 @@ function resetRuntimeForLayout() {
 			p.state = 'walk';
 		}
 	}
-	// 編成長が変わると車両数が合わなくなるので、走行中の列車は作り直す
-	for (const tr of R.trains) {
-		trainGroup.remove(tr.mesh);
-		tr.mesh.traverse(o => { if (o.geometry) o.geometry.dispose(); });
-	}
+	// レイアウトが変わると有効なスジが変わるので、走行中の列車は消してダイヤを組み直す
+	for (const tr of R.trains) if (tr.mesh) trainGroup.remove(tr.mesh);
 	R.trains.length = 0;
-	R.trackTimer = [];
+	R.missAcc = new Array(Math.max(1, S.nTrack)).fill(0);
 	recountWaiting();
+	compileSched();
 }
 
 /* ================= UI ================= */
@@ -2295,6 +2512,32 @@ function boot() {
 		reset: () => { noSave = true; localStorage.removeItem(SAVE_KEY); location.reload(); },
 		// S を直接いじった後に呼ぶ(レイアウト反映)
 		rebuild: () => { resetRuntimeForLayout(); buildStation(); renderUpgrades(); },
+		// 契約: 形式ID, 両数, 本数
+		hire: (mid, cars, n) => {
+			const m = modelOf(mid);
+			if (m.cars.indexOf(cars) < 0) return '両数が組めない: ' + m.cars.join('/');
+			const cost = contractPrice(mid, cars) * (n || 1);
+			if (S.money < cost) return '資金不足 ' + yen(cost);
+			S.money -= cost;
+			const f = S.fleet.find(x => x.m === mid && x.cars === cars);
+			if (f) f.n += (n || 1); else S.fleet.push({ m: mid, cars: cars, n: n || 1 });
+			compileSched(); renderUpgrades();
+			return 'ok ' + yen(cost);
+		},
+		// ダイヤ: パターン1行を追加 {m,cars,ty,track,from,to,every,off,dwell} 分単位
+		addDia: (o) => {
+			const d = Object.assign({
+				id: S.diaId++, m: 'kiha40', cars: 2, ty: 0, track: 0,
+				from: 5 * 60, to: 24 * 60, every: 30, off: 0, dwell: 45,
+			}, o || {});
+			// from/to は 4:00 起点の分に直す
+			d.from = (d.from - 4 * 60 + 1440) % 1440;
+			d.to = d.from + (o.to - o.from);
+			S.dia.push(d);
+			compileSched();
+			return { id: d.id, slots: R.sched.length, need: R.need, short: R.short, issues: R.issues.slice(0, 4) };
+		},
+		dia: () => ({ fleet: S.fleet, dia: S.dia, slots: R.sched.length, need: R.need, have: R.have, short: R.short, issues: R.issues.slice(0, 6) }),
 		step: sec => {
 			for (let r = sec; r > 0; r -= 30) simulate(Math.min(30, r));
 			renderPax(); uiTick = 1; updateUI(0);
