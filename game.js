@@ -169,9 +169,11 @@ function fillRect(l, x0, x1, z0, z1, type) {
 }
 
 // 設備を置く。占有セルに種別とIDを書く
-function placeFac(kind, l, x, z, w, d, cell) {
+function placeFac(kind, l, x, z, w, d, cell, meta) {
 	const id = B.nextId++;
-	B.objs.set(id, { i: id, k: kind, l: l, x: x, z: z, w: w, d: d });
+	// meta は設備番号(階段 kk / 改札 jj)。B.o はあとから置いた設備に奪われるので、
+	// セル→設備の逆引きは必ずこのレコードから作る
+	B.objs.set(id, Object.assign({ i: id, k: kind, l: l, x: x, z: z, w: w, d: d }, meta));
 	for (let i = 0; i < w; i++) {
 		for (let j = 0; j < d; j++) {
 			if (!inBoard(x + i, z + j)) continue;
@@ -242,7 +244,8 @@ function gridFromParams() {
 				const sz = (S.stairs === 1 || sb <= sa) ? Math.round((sa + sb) / 2)
 					: Math.round(sa + k * (sb - sa) / (S.stairs - 1));
 				if (sz < 0 || sz + 4 >= GRID.D) continue;
-				placeFac(S.esc ? 'escal' : 'stair', 0, px, sz, 2, 5, S.esc ? C_ESCAL : C_STAIR);
+				placeFac(S.esc ? 'escal' : 'stair', 0, px, sz, 2, 5, S.esc ? C_ESCAL : C_STAIR,
+					{ plat: i, kk: k });        // R.stairFree[plat][k] と対応づける
 			}
 		}
 	} else {
@@ -265,7 +268,8 @@ function gridFromParams() {
 	for (let j = 0; j < total; j++) {
 		const row = Math.floor(j / cols), col = j % cols;
 		const gzz = gz - row * 2;
-		if (gzz > fz0) placeFac(gateIsManual(j) ? 'gateM' : 'gateA', LU, fx0 + 1 + col, gzz, 1, 1, C_GATE);
+		if (gzz > fz0) placeFac(gateIsManual(j) ? 'gateM' : 'gateA', LU, fx0 + 1 + col, gzz, 1, 1, C_GATE,
+			{ jj: j });                        // R.gateFree[j] と対応づける
 	}
 
 	// 駅ナカコンビニ(3×4 = 6×8m = 48m²。NewDaysの平均と一致)と自販機
@@ -281,12 +285,532 @@ function gridFromParams() {
 	}
 
 	rebuildDerived();
+	buildWalkGraph();      // Stage3: 盤面から歩行グラフと距離場を起こす(無効化点はここだけ)
 }
 
 /* ---- 盤面から派生値を作る。recalcGeometry() のグリッド版 ----
    番線は「RAIL_L/RAIL_R のペアがZ方向に連なる区間」として検出する。
    永続ID(tid)はセーブが持ち、実行時は表示順の密インデックス(ti)で引く */
 const DV = { tracks: [], byTid: null, plats: [], ver: 0 };
+
+/* ================= Stage3: 歩行グラフ =================
+   盤面 B から起こす派生データ。B.t / B.f は一切書き換えない
+   (greedyRects が拾ってしまい、3Dの外形が変わるため)。
+   無効化点は gridFromParams() の出口ただ1箇所。
+
+   設計の要:
+   - 距離場は「出口 → ホーム」のような端から端までは絶対に張らない。
+     盤面には改札の壁が無く(改札セルの左右に床が残る)、端から端まで張ると
+     全員が改札を迂回できてしまい、待ち行列＝経済が静かに消える。
+     場が案内するのは、いま向かっているアンカーの「集団」までに限る。
+   - 層をまたぐ辺は縦ポータル(pass の bit1)だけで表す。実際に登り降りするのは
+     従来どおり climb ノードで、場は距離を伝播させるためだけに使う。 */
+const WK_MAXFIELD = 26;        // 場の上限枚数(26 × 154KiB = 3.91MiB)
+const WK_MAXGROW = 6;          // 改札は何行ぶんまで場を持つか
+const WK_PASS = 1, WK_PORT = 2;
+
+const WK = {
+	ver: 0,            // 盤面版数。buildWalkGraph() のたびに ++
+	pass: null,        // Uint8Array(N)  bit0=歩ける bit1=縦ポータルあり
+	q: null,           // Int32Array(N)  BFSのリングキュー(全場で使い回す)
+	fields: [],        // [{name, roots, dist, visited}]
+	fEXIT: -1,
+	fGP: [],           // 改札の行 → 精算済側(-Z)の場id
+	fGU: [],           // 改札の行 → 改札外側(+Z)の場id
+	fSTAIR: [],        // ホーム面 → 階段列(コンコース側)の場id
+	fCROSS_P: -1, fCROSS_U: -1,
+	// 逆引き表。B.o は後から置いた設備に奪われるので必ず B.objs から作る
+	gateCell: null, gateMouth: null, gateRow: null,
+	stairTop: null, stairBot: null,
+	platRect: [], boardX: null, entRect: null,
+	crossZ: -1, crossX0: -1, crossX1: -1,
+	probe: null,       // 連結判定の作業配列(使い回す)
+	solidShop: true,   // 店舗/自販機を通行不可にするか。動線が切れたら自動で false
+	shopFallback: false,
+	tiOk: true,        // DV.tracks の ti と パラメトリックの番線番号が一致しているか
+	anchor: false,     // アンカーを盤面へ寄せるか(C3)
+	on: false,         // stepField で歩かせるか(C5)
+	audit: { on: false, n: 0, offGraph: 0, gap: [], cos: [], legOver: 0 },
+	stat: { rebuildMs: 0, evicted: 0, fallback: 0, stale: 0, dropped: 0 },
+};
+
+// 3Dでは中身の詰まった箱として描かれるので、店舗と自販機は通行不可にする
+function wkSolid(t) { return WK.solidShop && (t === C_SHOP || t === C_VEND); }
+
+function buildWalkGraph() {
+	const t0 = (typeof performance !== 'undefined') ? performance.now() : 0;
+	const N = GRID.W * GRID.D * GRID.L;
+	if (!WK.pass || WK.pass.length !== N) { WK.pass = new Uint8Array(N); WK.q = new Int32Array(N); }
+	WK.solidShop = true;
+	wkIndexBoard();          // platRect を先に作る(継ぎ目の補修が使う)
+	wkIndexFacs();
+	wkBakePass();
+	if (!wkConnected()) {
+		// 店舗が駅舎を割った。動線を優先して通行可に戻す
+		WK.solidShop = false; wkBakePass(); WK.shopFallback = true;
+	} else WK.shopFallback = false;
+	wkBuildFields();
+	WK.ver++;
+	WK.stat.rebuildMs = ((typeof performance !== 'undefined') ? performance.now() : 0) - t0;
+}
+
+/* ---- 盤面を走査して索引を作る ----
+   gridFromParams() の座標式をここで再現してはいけない。式が2箇所に増えると、
+   将来レイアウトを変えたときに静かに1〜2セルずれる */
+function wkIndexBoard() {
+	const LU = hasLink() ? 1 : 0, W = GRID.W, D = GRID.D;
+	// ホーム矩形。C_PLAT の x 連続区間ごとに1面
+	WK.platRect.length = 0;
+	let x = 0;
+	while (x < W) {
+		let z0 = -1, z1 = -1;
+		for (let z = 0; z < D; z++) if (B.t[gidx(0, x, z)] === C_PLAT) { if (z0 < 0) z0 = z; z1 = z; }
+		if (z0 < 0) { x++; continue; }
+		let x1 = x;
+		while (x1 + 1 < W && B.t[gidx(0, x1 + 1, z0)] === C_PLAT) x1++;
+		WK.platRect.push({ x0: x, x1: x1, z0: z0, z1: z1 });
+		x = x1 + 1;
+	}
+	// 出口の帯
+	let ex0 = 1e9, ex1 = -1, ez0 = 1e9, ez1 = -1;
+	for (let xx = 0; xx < W; xx++) for (let z = 0; z < D; z++) {
+		if (B.t[gidx(LU, xx, z)] === C_ENTRANCE) {
+			if (xx < ex0) ex0 = xx; if (xx > ex1) ex1 = xx;
+			if (z < ez0) ez0 = z; if (z > ez1) ez1 = z;
+		}
+	}
+	WK.entRect = ex1 >= 0 ? { x0: ex0, x1: ex1, z0: ez0, z1: ez1 } : null;
+	// 構内踏切(地平のみ)。F_CROSS の外接
+	WK.crossZ = -1; WK.crossX0 = -1; WK.crossX1 = -1;
+	if (!hasLink()) {
+		let cx0 = 1e9, cx1 = -1, cz0 = 1e9;
+		for (let xx = 0; xx < W; xx++) for (let z = 0; z < D; z++) {
+			if (B.f[gidx(0, xx, z)] & F_CROSS) {
+				if (xx < cx0) cx0 = xx; if (xx > cx1) cx1 = xx; if (z < cz0) cz0 = z;
+			}
+		}
+		if (cx1 >= 0) { WK.crossX0 = cx0; WK.crossX1 = cx1; WK.crossZ = cz0; }
+	}
+	// 番線 → 乗車位置のホーム列。DV.tracks(盤面から検出したもの)から引く
+	const nt = Math.max(1, S.nTrack);
+	WK.boardX = new Int32Array(nt).fill(-1);
+	// ti はx昇順、パラメトリックの番線もx昇順。ずれていたら場を使わせない
+	WK.tiOk = DV.tracks.length === S.nTrack && DV.tracks.every((r, i) => r.ti === i);
+	if (WK.tiOk) {
+		for (const r of DV.tracks) {
+			if (r.ti >= nt) continue;
+			const zc = r.adjZ1 >= 0 ? r.adjZ1 : Math.round((r.z0 + r.z1) / 2);
+			WK.boardX[r.ti] = tAt(0, r.x - 1, zc) === C_PLAT ? r.x - 1 : r.x + 2;
+		}
+	}
+}
+
+/* ---- 設備の逆引き ----
+   B.o はあとから置いた設備に上書きされる(店1個で改札のセルが化ける)ので使わない。
+   名前は kk/jj/plat にする。o.k は種別の文字列で、3D生成がそれで分岐している */
+function wkIndexFacs() {
+	const LU = hasLink() ? 1 : 0, MS = CFG.MAX_STAIRS, ng = gateCount();
+	WK.gateCell = new Int32Array(Math.max(1, ng)).fill(-1);
+	WK.gateMouth = new Int32Array(Math.max(2, ng * 2)).fill(-1);
+	WK.gateRow = new Int32Array(Math.max(1, ng)).fill(-1);
+	WK.stairTop = new Int32Array(Math.max(1, S.nPlat * MS)).fill(-1);
+	WK.stairBot = new Int32Array(Math.max(1, S.nPlat * MS)).fill(-1);
+	for (const o of B.objs.values()) {
+		if (o.jj !== undefined && o.jj < ng) {
+			WK.gateCell[o.jj] = gidx(o.l, o.x, o.z);
+			WK.gateMouth[o.jj * 2 + 0] = gidx(o.l, o.x, o.z - 1);   // 精算済側(-Z)
+			WK.gateMouth[o.jj * 2 + 1] = gidx(o.l, o.x, o.z + 1);   // 改札外側(+Z)
+		}
+		if (o.plat !== undefined && o.kk !== undefined && o.plat < S.nPlat && o.kk < MS) {
+			const t = o.plat * MS + o.kk;
+			WK.stairBot[t] = gidx(0, o.x, o.z + o.d - 1);           // +Z端 = ホーム口
+			WK.stairTop[t] = gidx(LU, o.x, o.z);                    // -Z端 = コンコース口
+		}
+	}
+}
+
+/* ---- 通行マスクを焼く ----
+   (a)セル種別 (b)地平駅の継ぎ目の補修 (c)縦ポータル
+   補修で B.t に C_FLOOR を書くと greedyRects が拾って駅舎がホームまで伸びるので、
+   必ずマスク側だけを塞ぐ */
+function wkBakePass() {
+	const p = WK.pass;
+	p.fill(0);
+	for (let i = 0; i < p.length; i++) {
+		const t = B.t[i];
+		if (wkSolid(t)) continue;
+		if (WALKABLE[t] || ((t === C_RAIL_L || t === C_RAIL_R) && (B.f[i] & F_CROSS))) p[i] = WK_PASS;
+	}
+	// 地平駅はホーム南端と構内踏切のあいだが1行空いていて、盤面上は分断されている
+	if (!hasLink() && WK.platRect.length && WK.crossZ >= 0) {
+		for (const pr of WK.platRect) {
+			const zs = pr.z1 + 1;
+			if (zs >= WK.crossZ) continue;
+			for (let x = pr.x0; x <= pr.x1; x++) {
+				if (!(p[gidx(0, x, pr.z1)] & WK_PASS) || !(p[gidx(0, x, WK.crossZ)] & WK_PASS)) continue;
+				for (let z = zs; z < WK.crossZ; z++) p[gidx(0, x, z)] = WK_PASS;
+			}
+		}
+	}
+	// 縦ポータル。階段の footprint 全体に立てる(口の1セルだけだと階段の幅が使われない)
+	if (hasLink()) {
+		for (const o of B.objs.values()) {
+			if (o.k !== 'stair' && o.k !== 'escal') continue;
+			for (let i = 0; i < o.w; i++) for (let j = 0; j < o.d; j++) {
+				if (!inBoard(o.x + i, o.z + j)) continue;
+				const a = gidx(0, o.x + i, o.z + j), b = gidx(1, o.x + i, o.z + j);
+				if ((p[a] & WK_PASS) && (p[b] & WK_PASS)) { p[a] |= WK_PORT; p[b] |= WK_PORT; }
+			}
+		}
+	}
+}
+
+// 軸に沿った歩行可セルの走り。zAxis=true なら x 固定でZへ、false なら z 固定でXへ
+function wkRun(l, a0, a1, fixed, zAxis) {
+	const out = [];
+	for (let a = Math.min(a0, a1); a <= Math.max(a0, a1); a++) {
+		const x = zAxis ? fixed : a, z = zAxis ? a : fixed;
+		if (!inBoard(x, z)) continue;
+		const k = gidx(l, x, z);
+		if (WK.pass[k] & WK_PASS) out.push(k);
+	}
+	return Int32Array.from(out);
+}
+
+// 矩形の中の歩行可セル
+function wkCellsOf(l, r) {
+	if (!r) return new Int32Array(0);
+	const out = [];
+	for (let x = r.x0; x <= r.x1; x++) for (let z = r.z0; z <= r.z1; z++) {
+		if (!inBoard(x, z)) continue;
+		const k = gidx(l, x, z);
+		if (WK.pass[k] & WK_PASS) out.push(k);
+	}
+	return Int32Array.from(out);
+}
+
+function wkAddField(name, roots, stride) {
+	if (!roots || !roots.length) { WK.stat.dropped++; return -1; }
+	if (WK.fields.length >= WK_MAXFIELD) { WK.stat.dropped++; return -1; }
+	const N = GRID.W * GRID.D * GRID.L;
+	// stride は根が並ぶ索引の刻み。0 なら矩形の根(隙間の判定をしない)
+	const f = { name: name, roots: roots, stride: stride || 0, dist: new Uint16Array(N), visited: 0 };
+	wkFieldBuild(f);
+	WK.fields.push(f);
+	return WK.fields.length - 1;
+}
+
+// 多始点BFS。4近傍 + 縦ポータル
+function wkFieldBuild(f) {
+	const pass = WK.pass, dist = f.dist, q = WK.q;
+	const W = GRID.W, D = GRID.D, LW = W * D;
+	dist.fill(0xffff);
+	let h = 0, t = 0;
+	for (let i = 0; i < f.roots.length; i++) {
+		const s = f.roots[i];
+		if ((pass[s] & WK_PASS) && dist[s] === 0xffff) { dist[s] = 0; q[t++] = s; }
+	}
+	while (h < t) {
+		const k = q[h++], d1 = dist[k] + 1;
+		const l = k >= LW ? 1 : 0, r = k - l * LW, x = (r / D) | 0, z = r - x * D;
+		let n;
+		if (x > 0) { n = k - D; if ((pass[n] & WK_PASS) && dist[n] === 0xffff) { dist[n] = d1; q[t++] = n; } }
+		if (x < W - 1) { n = k + D; if ((pass[n] & WK_PASS) && dist[n] === 0xffff) { dist[n] = d1; q[t++] = n; } }
+		if (z > 0) { n = k - 1; if ((pass[n] & WK_PASS) && dist[n] === 0xffff) { dist[n] = d1; q[t++] = n; } }
+		if (z < D - 1) { n = k + 1; if ((pass[n] & WK_PASS) && dist[n] === 0xffff) { dist[n] = d1; q[t++] = n; } }
+		if (pass[k] & WK_PORT) {
+			n = l ? k - LW : k + LW;
+			if ((pass[n] & WK_PASS) && dist[n] === 0xffff) { dist[n] = d1; q[t++] = n; }
+		}
+	}
+	f.visited = t;
+}
+
+// 出口から全ホームが見えるか。店舗が駅舎を割っていないかの判定に使う
+function wkConnected() {
+	if (!WK.entRect || !WK.platRect.length) return true;
+	const LU = hasLink() ? 1 : 0;
+	const N = GRID.W * GRID.D * GRID.L;
+	if (!WK.probe || WK.probe.length !== N) WK.probe = new Uint16Array(N);
+	const f = { name: '_probe', roots: wkCellsOf(LU, WK.entRect), dist: WK.probe, visited: 0 };
+	if (!f.roots.length) return true;
+	wkFieldBuild(f);
+	for (const r of WK.platRect) {
+		for (let x = r.x0; x <= r.x1; x++) for (let z = r.z0; z <= r.z1; z++) {
+			if (f.dist[gidx(0, x, z)] === 0xffff) return false;
+		}
+	}
+	return true;
+}
+
+// 全ての階段の外接(コンコース側)。ホーム面ごと
+function wkStairSpan(plat) {
+	const MS = CFG.MAX_STAIRS;
+	let x0 = 1e9, x1 = -1, z0 = 1e9, z1 = -1;
+	for (const o of B.objs.values()) {
+		if (o.plat !== plat) continue;
+		if (o.k !== 'stair' && o.k !== 'escal') continue;
+		if (o.x < x0) x0 = o.x; if (o.x + o.w - 1 > x1) x1 = o.x + o.w - 1;
+		if (o.z < z0) z0 = o.z; if (o.z + o.d - 1 > z1) z1 = o.z + o.d - 1;
+	}
+	void MS;
+	return x1 >= 0 ? { x0: x0, x1: x1, z0: z0, z1: z1 } : null;
+}
+
+function wkBuildFields() {
+	WK.fields.length = 0; WK.stat.dropped = 0;
+	const LU = hasLink() ? 1 : 0;
+	WK.fEXIT = wkAddField('EXIT', wkCellsOf(LU, WK.entRect));
+
+	// 改札。行ごとに 精算済側(-Z) と 改札外側(+Z) の隣接行を根にする
+	WK.fGP.length = 0; WK.fGU.length = 0;
+	const rows = new Map();
+	for (let j = 0; j < WK.gateCell.length; j++) {
+		const c = WK.gateCell[j];
+		if (c < 0) continue;
+		const LW = GRID.W * GRID.D, l = c >= LW ? 1 : 0, rr = c - l * LW;
+		const gx = (rr / GRID.D) | 0, gz = rr - gx * GRID.D;
+		const r = rows.get(gz) || { x0: gx, x1: gx };
+		if (gx < r.x0) r.x0 = gx; if (gx > r.x1) r.x1 = gx;
+		rows.set(gz, r);
+	}
+	// 行番号は既存の row = floor(j/cols) と同じ順序になるよう z 降順(改札外側から)で振る
+	const zs = Array.from(rows.keys()).sort((a, b) => b - a);
+	zs.forEach((gz, r) => {
+		const g = rows.get(gz);
+		if (r >= WK_MAXGROW) { WK.fGP[r] = -1; WK.fGU[r] = -1; WK.stat.dropped += 2; return; }
+		WK.fGP[r] = wkAddField('GP' + r, wkRun(LU, g.x0, g.x1, gz - 1, false), GRID.D);
+		WK.fGU[r] = wkAddField('GU' + r, wkRun(LU, g.x0, g.x1, gz + 1, false), GRID.D);
+		for (let j = 0; j < WK.gateCell.length; j++) {
+			if (WK.gateCell[j] >= 0 && WK.gateCell[j] % GRID.D === gz) WK.gateRow[j] = r;
+		}
+	});
+
+	// 階段。ホーム面ごとに、コンコース側の列を「外接する走り」ごと根にする
+	WK.fSTAIR.length = 0;
+	for (let i = 0; i < S.nPlat; i++) {
+		const sp = wkStairSpan(i);
+		WK.fSTAIR[i] = sp ? wkAddField('ST' + i, wkCellsOf(LU, sp)) : -1;
+	}
+
+	// 地平の構内踏切
+	if (!hasLink() && WK.crossZ >= 0 && WK.platRect.length) {
+		const pr = WK.platRect[0];
+		WK.fCROSS_P = wkAddField('XP', wkRun(0, pr.x0, pr.x1, WK.crossZ, false), GRID.D);
+		WK.fCROSS_U = wkAddField('XU', wkRun(0, WK.crossX1, WK.crossX1, WK.crossZ, false), GRID.D);
+	} else { WK.fCROSS_P = -1; WK.fCROSS_U = -1; }
+}
+
+/* ---- 実行時のサンプリング ---- */
+// Math.floor を使うこと。|0 だと X<0 で1マスずれる。OX=88 なので盤の西半分は常に X<0
+function wkCellOf(l, X, Z) {
+	const x = cx(X), z = cz(Z);
+	return inBoard(x, z) ? gidx(l, x, z) : -1;
+}
+
+const _wg = { x: 0, z: 0, ok: false, at: false };
+function wkSample(fid, k) {
+	_wg.ok = false; _wg.at = false;
+	if (fid < 0 || k < 0 || fid >= WK.fields.length) return _wg;
+	const d = WK.fields[fid].dist, D = GRID.D, LW = GRID.W * D;
+	const here = d[k];
+	if (here === 0xffff) return _wg;
+	if (here === 0) { _wg.ok = true; _wg.at = true; _wg.x = 0; _wg.z = 0; return _wg; }
+	const c = here + 2;                                  // 盤外・不通は「2歩ぶん遠い」
+	const l = k >= LW ? 1 : 0, r = k - l * LW, x = (r / D) | 0, z = r - x * D;
+	const xm = x > 0 ? Math.min(d[k - D], c) : c, xp = x < GRID.W - 1 ? Math.min(d[k + D], c) : c;
+	const zm = z > 0 ? Math.min(d[k - 1], c) : c, zp = z < D - 1 ? Math.min(d[k + 1], c) : c;
+	let gx = xm - xp, gz = zm - zp;
+	if (gx === 0 && gz === 0) {
+		// 平坦(偶数幅の通路など)。いちばん近い隣へ倒す
+		let best = here, bi = 0;
+		if (xm < best) { best = xm; bi = 1; }
+		if (xp < best) { best = xp; bi = 2; }
+		if (zm < best) { best = zm; bi = 3; }
+		if (zp < best) { best = zp; bi = 4; }
+		if (!bi) return _wg;
+		gx = bi === 1 ? -1 : bi === 2 ? 1 : 0;
+		gz = bi === 3 ? -1 : bi === 4 ? 1 : 0;
+	}
+	const m = Math.hypot(gx, gz);
+	_wg.x = gx / m; _wg.z = gz / m; _wg.ok = true;
+	return _wg;
+}
+
+/* ---- 静的検査。乗客を1人も動かさずに盤面の健全性を測る ---- */
+// 根の走りの中に通行不可セルがあると、最終接近の直線が塞がる
+function wkRunGaps() {
+	let bad = 0;
+	for (const f of WK.fields) {
+		if (!f.stride || f.roots.length < 2) continue;
+		const a = f.roots[0], b = f.roots[f.roots.length - 1];
+		const want = Math.floor(Math.abs(b - a) / f.stride) + 1;
+		if (want > f.roots.length) bad += want - f.roots.length;
+	}
+	return bad;
+}
+
+function wkPortalPairs() {
+	const out = [], MS = CFG.MAX_STAIRS, LW = GRID.W * GRID.D;
+	for (let plat = 0; plat < S.nPlat; plat++) for (let kk = 0; kk < MS; kk++) {
+		const t = plat * MS + kk, bot = WK.stairBot[t], top = WK.stairTop[t];
+		if (bot < 0 && top < 0) continue;
+		const botPass = bot >= 0 && !!(WK.pass[bot] & WK_PASS);
+		const topPass = top >= 0 && !!(WK.pass[top] & WK_PASS);
+		// 上端の真下(または真上)にポータルが立っているか
+		const other = top >= 0 ? (top >= LW ? top - LW : top + LW) : -1;
+		const linked = top >= 0 && !!(WK.pass[top] & WK_PORT) && other >= 0 && !!(WK.pass[other] & WK_PASS);
+		out.push({ plat: plat, kk: kk, botPass: botPass, topPass: topPass, linked: linked });
+	}
+	return out;
+}
+
+function wkStairMissing() {
+	const MS = CFG.MAX_STAIRS;
+	let n = 0;
+	for (let plat = 0; plat < S.nPlat; plat++) for (let kk = 0; kk < S.stairs; kk++) {
+		if (WK.stairBot[plat * MS + kk] < 0) n++;
+	}
+	return n;
+}
+
+// パラメトリック座標と盤面座標のずれ。C3で座標がどれだけ動くかを事前に知る
+function wkAnchorDrift() {
+	const d = [];
+	for (let j = 0; j < gateCount(); j++) {
+		const a = wkAnchorGate(j, true);
+		if (!a) continue;
+		const g = gatePos(j);
+		d.push(Math.hypot(a.x - g.x, a.z - g.z));
+	}
+	for (let plat = 0; plat < S.nPlat; plat++) for (let k = 0; k < S.stairs; k++) {
+		const a = wkAnchorStair(plat, k, false);
+		if (!a) continue;
+		d.push(Math.hypot(a.x - platX(plat), a.z - (stairZ(k) + 2)));
+	}
+	if (!d.length) return { p50: 0, p95: 0, max: 0, n: 0 };
+	d.sort((a, b) => a - b);
+	return {
+		p50: +d[Math.floor(d.length * 0.5)].toFixed(2),
+		p95: +d[Math.floor(d.length * 0.95)].toFixed(2),
+		max: +d[d.length - 1].toFixed(2), n: d.length,
+	};
+}
+
+function wkKeyToXZ(k) {
+	const LW = GRID.W * GRID.D, l = k >= LW ? 1 : 0, r = k - l * LW;
+	const x = (r / GRID.D) | 0, z = r - x * GRID.D;
+	return { l: l, gx: x, gz: z, x: wx(x), z: wz(z) };
+}
+
+// 改札の口。paid=true なら精算済側(-Z)、false なら改札外側(+Z)
+function wkAnchorGate(j, paid) {
+	if (!WK.gateMouth || j < 0 || j * 2 + 1 >= WK.gateMouth.length) return null;
+	const k = WK.gateMouth[j * 2 + (paid ? 0 : 1)];
+	if (k < 0 || !(WK.pass[k] & WK_PASS)) return null;
+	const p = wkKeyToXZ(k);
+	return { x: p.x, z: p.z };
+}
+
+// 階段の口。top=true ならコンコース側(-Z端)、false ならホーム側(+Z端)
+function wkAnchorStair(plat, k, top) {
+	const MS = CFG.MAX_STAIRS, t = plat * MS + k;
+	if (!WK.stairTop || t < 0 || t >= WK.stairTop.length) return null;
+	const key = top ? WK.stairTop[t] : WK.stairBot[t];
+	if (key < 0 || !(WK.pass[key] & WK_PASS)) return null;
+	const p = wkKeyToXZ(key);
+	return { x: p.x, z: p.z };
+}
+
+// 構内踏切の口。'plat'=ホーム側 'conc'=駅舎側
+function wkAnchorCross(side) {
+	if (WK.crossZ < 0 || !WK.platRect.length) return null;
+	const pr = WK.platRect[0];
+	const gx = side === 'plat' ? Math.round((pr.x0 + pr.x1) / 2) : WK.crossX1;
+	if (!inBoard(gx, WK.crossZ)) return null;
+	return { x: wx(gx), z: wz(WK.crossZ) };
+}
+
+// 乗車位置。線路の上には立たせない
+function wkAnchorBoard(plat, track, dz) {
+	const gx = WK.boardX && track < WK.boardX.length ? WK.boardX[track] : -1;
+	if (gx < 0) return { x: platX(plat) + trackSide(track) * (S.platW / 2 - 1.3), z: dz };
+	return { x: wx(gx), z: dz };
+}
+
+function walkStats() {
+	if (!WK.pass) return null;
+	let walk = 0, port = 0;
+	for (let i = 0; i < WK.pass.length; i++) {
+		if (WK.pass[i] & WK_PASS) walk++;
+		if (WK.pass[i] & WK_PORT) port++;
+	}
+	const fs = WK.fields.map(f => {
+		let ok = 0;
+		for (let i = 0; i < WK.pass.length; i++) if ((WK.pass[i] & WK_PASS) && f.dist[i] !== 0xffff) ok++;
+		return { name: f.name, roots: f.roots.length, reach: +(ok / Math.max(1, walk)).toFixed(3), visited: f.visited };
+	});
+	const platUnreach = WK.platRect.map(r => {
+		let bad = 0;
+		for (const f of WK.fields) for (let x = r.x0; x <= r.x1; x++) for (let z = r.z0; z <= r.z1; z++) {
+			if (f.dist[gidx(0, x, z)] === 0xffff) bad++;
+		}
+		return bad;
+	});
+	let boardOnRail = 0;
+	for (let t = 0; t < WK.boardX.length; t++) {
+		const gx = WK.boardX[t];
+		if (gx < 0) continue;
+		const pr = WK.platRect[t >> 1];
+		if (!pr) { boardOnRail++; continue; }
+		if (B.t[gidx(0, gx, Math.round((pr.z0 + pr.z1) / 2))] !== C_PLAT) boardOnRail++;
+	}
+	return {
+		walk: walk, port: port, fields: fs, platUnreach: platUnreach,
+		runGap: wkRunGaps(), portalPairs: wkPortalPairs(),
+		gateMissing: Array.prototype.filter.call(WK.gateCell, (c, j) => c < 0 && j < gateCount()).length,
+		stairMissing: wkStairMissing(), boardOnRail: boardOnRail, tiOk: WK.tiOk,
+		anchorDrift: wkAnchorDrift(), shopFallback: WK.shopFallback,
+		dropped: WK.stat.dropped, rebuildMs: +WK.stat.rebuildMs.toFixed(2),
+		evicted: WK.stat.evicted, fallback: WK.stat.fallback, stale: WK.stat.stale,
+	};
+}
+
+// 増築の順に流して、各段で盤面が健全かを見る
+function walkSweep() {
+	const keep = JSON.stringify(S);
+	const out = [];
+	const step = (label) => {
+		resetRuntimeForLayout();
+		const w = walkStats();
+		out.push({
+			step: label, walk: w.walk, port: w.port, fields: w.fields.length,
+			platUnreach: w.platUnreach.reduce((a, b) => a + b, 0),
+			runGap: w.runGap, gateMissing: w.gateMissing, stairMissing: w.stairMissing,
+			boardOnRail: w.boardOnRail, tiOk: w.tiOk, shopFallback: w.shopFallback,
+			dropped: w.dropped, ms: w.rebuildMs,
+			portalBad: w.portalPairs.filter(p => !p.linked).length,
+			drift: w.anchorDrift.max,
+		});
+	};
+	try {
+		S.link = 0; S.nPlat = 1; S.nTrack = 1; S.cars = 2; S.stairs = 0; S.gateA = 0; S.gateM = 0; S.shops = 0; S.esc = false;
+		step('開業 地平1面1線2両 改札0');
+		S.gateA = 4; step('地平 +自動改札4');
+		S.gateM = 2; S.shops = 1; step('地平 +手動2 +店1');
+		S.link = 1; S.stairs = 2; S.cars = 10; step('橋上 1面1線10両 階段2');
+		S.nPlat = 2; S.nTrack = 4; S.gateA = 16; step('橋上 2面4線 改札18');
+		S.nPlat = 4; S.nTrack = 8; S.cars = 15; S.stairs = 4; S.gateA = 34; S.shops = 4; step('橋上 4面8線15両');
+		S.esc = true; step('橋上 4面8線 エスカレータ');
+		S.link = 2; step('地下 4面8線');
+		S.nPlat = 10; S.nTrack = 20; S.stairs = 6; S.gateA = 144; S.shops = 12; S.concW = 8; step('地下 10面20線 新宿級');
+	} finally {
+		S = JSON.parse(keep);
+		resetRuntimeForLayout();
+		buildStation();
+	}
+	return out;
+}
 
 function rebuildDerived() {
 	const tracks = [];
@@ -2800,6 +3324,9 @@ function resetRuntimeForLayout() {
 	// 地平駅に階段は無い。立体交差なら最低1つ
 	S.stairs = hasLink() ? Math.max(1, Math.min(S.stairs, maxStairs())) : 0;
 	recalcGeometry();
+	// 盤面と歩行グラフを先に起こす。下の経路再生成が距離場の番号を焼き込むので、
+	// 順序が逆だと古い盤面の場を掴む
+	try { gridFromParams(); } catch (e) { console.error('grid', e); }
 	R.stairFree = [];
 	for (let i = 0; i < S.nPlat; i++) {
 		R.stairFree.push(new Array(CFG.MAX_STAIRS).fill(0));
@@ -2824,9 +3351,8 @@ function resetRuntimeForLayout() {
 	for (const tr of R.trains) if (tr.mesh) trainGroup.remove(tr.mesh);
 	R.trains.length = 0;
 	R.missAcc = new Array(Math.max(1, S.nTrack) * 2).fill(0);
+	R.crossFree = [0];       // 階段・改札と揃える。踏切だけ取り残されていた
 	recountWaiting();
-	// 盤面をパラメータから起こし直す(Stage1: 検証用に並走させている)
-	try { gridFromParams(); } catch (e) { console.error('grid', e); }
 	compileSched();
 }
 
@@ -3768,8 +4294,11 @@ function boot() {
 		ui: DIA,
 		minToX: minToX, xToMin: xToMin,
 		// 盤面(Stage1)
-		grid: GRID, board: B, dv: DV,
+		grid: GRID, board: B, dv: DV, wk: WK,
 		regrid: () => { gridFromParams(); return gridStats(); },
+		// 歩行グラフ(Stage3)。乗客を1人も動かさずに盤面の健全性を測る
+		walkStats: () => walkStats(),
+		walkSweep: () => walkSweep(),
 		gridStats: () => gridStats(),
 		step: sec => {
 			for (let r = sec; r > 0; r -= 30) simulate(Math.min(30, r));
