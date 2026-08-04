@@ -305,11 +305,50 @@ function gridSkeleton() {
 		pz0: pz0, pz1: pz1, px0: px0, fx0: fx0, fx1: fx1, fz0: fz0, fz1: fz1 };
 }
 
-/* ---- 設備 ----
-   いまはまだパラメトリックな座標式のまま。Stage4 で S.fac に置き換える */
-function facPlaceAll() {
-	const SK = B.sk, LU = SK.LU;
+/* ================= 設備 =================
+   プレイヤーが駅舎とホームの上に置くもの。S.fac が唯一の正で、盤面には毎回そこから焼く。
+   位置は「アンカー原点からの符号付きオフセット(マス)」で持つ。
+   原点は 駅舎の西端 fx0 と ホーム南端 pz1 で、拡幅・延伸・面増設のどれでも動かない側なので、
+   増築しても置いたものの相対位置が保たれる */
+const K_GATEA = 0, K_GATEM = 1, K_STAIR = 2, K_ESCAL = 3, K_CONV = 4, K_VEND = 5;
 
+// obj は B.objs のレコードの k(文字列)。3D生成がこれで分岐しているので変えない
+const FACS = [
+	/* K_GATEA */ { id: 'gateA', obj: 'gateA', name: '自動改札', w: 1, d: 1, cell: C_GATE, on: 'floor', lane: 1 },
+	/* K_GATEM */ { id: 'gateM', obj: 'gateM', name: '手動改札', w: 1, d: 1, cell: C_GATE, on: 'floor', lane: 1 },
+	/* K_STAIR */ { id: 'stair', obj: 'stair', name: '階段', w: 2, d: 5, cell: C_STAIR, on: 'plat', lane: 1 },
+	/* K_ESCAL */ { id: 'escal', obj: 'escal', name: 'エスカレーター', w: 2, d: 5, cell: C_ESCAL, on: 'plat', lane: 1 },
+	/* K_CONV  */ { id: 'conv', obj: 'conv', name: '駅ナカ店舗', w: 3, d: 4, cell: C_SHOP, on: 'floor' },
+	/* K_VEND  */ { id: 'vend', obj: 'vend', name: '自販機', w: 1, d: 1, cell: C_VEND, on: 'floor' },
+];
+
+/* アンカー原点。a=0 は駅舎(コンコース層)、a=1 はホーム n(地上層) */
+function facAnchor(a, n) {
+	const SK = B.sk;
+	if (a === 1) return { l: 0, ox: SK.px0[Math.min(n, SK.px0.length - 1)], oz: SK.pz1 };
+	return { l: SK.LU, ox: SK.fx0, oz: SK.pz1 };
+}
+function facCell(r) {
+	const A = facAnchor(r.a, r.n);
+	return { l: A.l, x: A.ox + r.x, z: A.oz + r.z };
+}
+
+// 1個だけ盤面に置く。骨格に収まらなければ false(レコードは捨てず休止にする)
+function facPlaceOne(r) {
+	const F = FACS[r.k];
+	if (!F) return false;
+	const c = facCell(r);
+	if (!inBoard(c.x, c.z) || !inBoard(c.x + F.w - 1, c.z + F.d - 1)) return false;
+	const meta = r.k === K_STAIR || r.k === K_ESCAL ? { plat: r.n, kk: r.s || 0 }
+		: (r.k === K_GATEA || r.k === K_GATEM) ? { jj: r.s || 0 } : undefined;
+	return placeFac(F.obj, c.l, c.x, c.z, F.w, F.d, F.cell, r.i, meta) >= 0;
+}
+
+/* いまのパラメトリックな設定から「置くべき設備の一覧」を作る。
+   Stage4 でプレイヤーが自分で置くようになるまでの自動レイアウト。
+   返すのはアンカー相対のオフセットで、絶対座標には触れない */
+function facAutoLayout() {
+	const SK = B.sk, want = [];
 	if (hasStairs()) {
 		// 階段(2×5マス = 4×10m)。駅舎に覆われた範囲に等間隔で置く
 		const sa = Math.max(SK.pz0 + 1, SK.fz0 + 1), sb = Math.min(SK.pz1 - 5, SK.fz1 - 5);
@@ -319,12 +358,10 @@ function facPlaceAll() {
 				const sz = (S.stairs === 1 || sb <= sa) ? Math.round((sa + sb) / 2)
 					: Math.round(sa + k * (sb - sa) / (S.stairs - 1));
 				if (sz < 0 || sz + 4 >= GRID.D) continue;
-				placeFac(S.esc ? 'escal' : 'stair', 0, px, sz, 2, 5, S.esc ? C_ESCAL : C_STAIR,
-					facNextId(), { plat: i, kk: k });        // R.stairFree[plat][k] と対応づける
+				want.push({ k: S.esc ? K_ESCAL : K_STAIR, a: 1, n: i, s: k, x: px - SK.px0[i], z: sz - SK.pz1 });
 			}
 		}
 	}
-
 	// 改札(1×1)。駅舎の中に横一列、はみ出したら手前へ折り返す
 	const total = gateCount();
 	const cols = Math.max(1, SK.fx1 - SK.fx0 - 1);
@@ -332,16 +369,14 @@ function facPlaceAll() {
 	for (let j = 0; j < total; j++) {
 		const row = Math.floor(j / cols), col = j % cols;
 		const gzz = gz - row * 2;
-		if (gzz > SK.fz0) placeFac(gateIsManual(j) ? 'gateM' : 'gateA', LU, SK.fx0 + 1 + col, gzz, 1, 1, C_GATE,
-			facNextId(), { jj: j });                        // R.gateFree[j] と対応づける
+		if (gzz > SK.fz0) want.push({ k: gateIsManual(j) ? K_GATEM : K_GATEA, a: 0, n: 0, s: j,
+			x: 1 + col, z: gzz - SK.pz1 });
 	}
-
 	/* 駅ナカコンビニ(3×4 = 6×8m = 48m²。NewDaysの平均と一致)と自販機。
 	   改札の帯を必ず避ける。ここを避けないと店が改札のセルを上書きし、
-	   改札が盤面から消えて乗客が通り抜けてしまう(地平駅では4個中3個が消えていた) */
+	   改札が盤面から消えて乗客が通り抜けてしまう */
 	const gRows = Math.max(1, Math.ceil(total / cols));
-	const gzTop = total ? gz - (gRows - 1) * 2 : gz;     // いちばん奥の改札行
-	// 奥(精算済側)に4マス取れれば駅ナカ、無理なら手前(改札外)へ回す
+	const gzTop = total ? gz - (gRows - 1) * 2 : gz;
 	let sz = gzTop - 5;
 	if (total && sz < SK.fz0 + 1) sz = gz + 2;
 	if (!total) sz = SK.fz0 + 1;
@@ -349,7 +384,7 @@ function facPlaceAll() {
 		const side = s % 2, idx = Math.floor(s / 2);
 		const sx = side ? SK.fx1 - 3 - idx * 4 : SK.fx0 + 1 + idx * 4;
 		if (sx > SK.fx0 && sx + 2 < SK.fx1 && sz > SK.fz0 && sz + 3 <= SK.fz1) {
-			placeFac('conv', LU, sx, sz, 3, 4, C_SHOP, facNextId());
+			want.push({ k: K_CONV, a: 0, n: 0, x: sx - SK.fx0, z: sz - SK.pz1 });
 		}
 	}
 	// 自販機は店とぶつからない列に寄せる
@@ -357,13 +392,41 @@ function facPlaceAll() {
 	for (let i = 0; i < Math.min(6, 1 + total / 8); i++) {
 		const vz = Math.min(SK.fz1 - 1, gz + 2 + i);
 		if (vz > SK.fz0 && vz < SK.fz1 && vx > SK.fx0 && vx < SK.fx1) {
-			placeFac('vend', LU, vx, vz, 1, 1, C_VEND, facNextId());
+			want.push({ k: K_VEND, a: 0, n: 0, x: vx - SK.fx0, z: vz - SK.pz1 });
 		}
 	}
+	return want;
+}
+
+/* 自動レイアウトの結果を S.fac に流し込む。
+   既にあるレコードは永続IDを引き継ぐ(待ち行列の時刻を持ち越すため)。
+   Stage4 でプレイヤーが置くようになったら、この呼び出しを外すだけでよい */
+function facSync() {
+	const want = facAutoLayout();
+	const old = S.fac, used = new Array(old.length).fill(false), out = [];
+	const take = (pred) => {
+		for (let i = 0; i < old.length; i++) if (!used[i] && pred(old[i])) { used[i] = true; return old[i]; }
+		return null;
+	};
+	for (const w of want) {
+		// 同じ種別・同じ場所のものを最優先で、次に同じ種別のものを引き継ぐ
+		const r = take(o => o.k === w.k && o.a === w.a && o.n === w.n && o.x === w.x && o.z === w.z)
+			|| take(o => o.k === w.k && o.a === w.a && o.n === w.n)
+			|| take(o => o.k === w.k);
+		if (r) { r.a = w.a; r.n = w.n; r.x = w.x; r.z = w.z; r.s = w.s; out.push(r); }
+		else out.push({ i: S.nextFid++, k: w.k, a: w.a, n: w.n, s: w.s, x: w.x, z: w.z });
+	}
+	S.fac = out;
+}
+
+// S.fac を盤面に焼く。配列の順に置く(あとのものが先のセルを上書きしうる)
+function facPlaceAll() {
+	for (const r of S.fac) r.off = facPlaceOne(r) ? 0 : 1;
 }
 
 function gridFromParams() {
 	gridSkeleton();
+	facSync();        // 自動レイアウト → S.fac(Stage4 でプレイヤーの配置に置き換える)
 	facPlaceAll();
 	rebuildDerived();
 	buildWalkGraph();      // Stage3: 盤面から歩行グラフと距離場を起こす(無効化点はここだけ)
@@ -1178,6 +1241,8 @@ function defaultState() {
 		concW: 0,             // コンコースの片側拡張幅
 		// 駅舎の大きさ(マス)。北=ホーム側への張り出し / 南=出口側の奥行き / 東への拡幅
 		bldN: 0, bldD: 0, bldW: 0,
+		// 置いた設備。[{i:永続ID, k:種別, a:アンカー(0=駅舎/1=ホーム), n:ホーム面, x,z:相対マス}]
+		fac: [], nextFid: 1,
 		shops: 0,             // 駅ナカ店舗
 		// 駅周辺の開発。これが乗客の源。開業時は小さな住宅地が1つあるだけ
 		devs: { home1: 1 },
@@ -3440,6 +3505,9 @@ function load() {
 		if (!Array.isArray(S.trackDir)) S.trackDir = [];
 		for (let t = 0; t < S.nTrack; t++) if (S.trackDir[t] === undefined) S.trackDir[t] = t % 2;
 		// 駅舎の大きさを持っていなかった頃のセーブ。bldFit() が焼く直前に埋めるので0で足りる
+		if (!Array.isArray(S.fac)) S.fac = [];
+		S.nextFid = Math.max(1, S.nextFid | 0);
+		for (const f of S.fac) if (f.i >= S.nextFid) S.nextFid = f.i + 1;
 		if (typeof S.bldN !== 'number') S.bldN = 0;
 		if (typeof S.bldD !== 'number') S.bldD = 0;
 		if (typeof S.bldW !== 'number') S.bldW = 0;
@@ -4651,6 +4719,12 @@ function boot() {
 		walkStats: () => walkStats(),
 		walkSweep: () => walkSweep(),
 		boardHash: () => boardHash(),
+		// 置いてある設備の一覧(種別ごとの台数と、休止しているもの)
+		fac: () => {
+			const n = {}, off = [];
+			for (const r of S.fac) { const id = FACS[r.k].id; n[id] = (n[id] || 0) + 1; if (r.off) off.push(r); }
+			return { n: n, total: S.fac.length, off: off.length, list: S.fac };
+		},
 		// 9構成を順に組んで盤面の指紋を並べる。作りかたを組み替えても一致するべき
 		hashSweep: () => hashSweep(),
 		// アンカーを盤面のセルへ寄せるか(C3)
