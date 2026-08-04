@@ -67,6 +67,8 @@ html, body {
 	background: rgba(20,30,45,.85); color: #cfe0f5; font-size: 12px; font-weight: 700;
 }
 #speed button.active { background: #2f7de0; color: #fff; }
+#speed button.x1 { font-size: 10px; }
+#speed button.x1.active { background: #7ee0a0; color: #10261a; }
 
 /* ===== 警告トースト ===== */
 #alert {

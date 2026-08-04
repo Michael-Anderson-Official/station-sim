@@ -48,7 +48,11 @@ const CFG = {
 	STAIR_HEADWAY: 0.85,   // 階段1つが1人を通す秒数
 	ESC_HEADWAY: 0.42,     // エスカレーター
 	STAIR_CLIMB: 9,        // 階段を上り下りする秒数
-	MAX_PAX: 2200,         // 同時表示エージェント上限
+	MAX_PAX: 2200,         // 高速再生時のエージェント上限
+	// 速度でディテールを切り替える。等倍のときは1体=1人にして実際に行列を作る
+	DETAIL_SPEED: 4,       // これ以下の速度なら詳細モード
+	MAX_PAX_DETAIL: 6000,  // 詳細モードの上限(iPhone 17 Pro 前提)
+	QUEUE_PITCH: 0.55,     // 行列の1人あたりの間隔(m)
 	MAX_STAIRS: 6,
 	MAX_SUB_DT: 0.5,       // 物理サブステップ上限(ゲーム秒)
 	DWELL_MIN: 25,         // 最低停車時間
@@ -1086,12 +1090,12 @@ function initPaxMesh() {
 	body.dispose(); head.dispose();
 
 	paxMesh = new THREE.InstancedMesh(geo,
-		new THREE.MeshStandardMaterial({ roughness: 0.85, metalness: 0 }), CFG.MAX_PAX);
+		new THREE.MeshStandardMaterial({ roughness: 0.85, metalness: 0 }), CFG.MAX_PAX_DETAIL);
 	paxMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 	paxMesh.frustumCulled = false;
 	paxMesh.castShadow = false;      // 2200体の影は重すぎるので落とす
 	paxMesh.receiveShadow = true;
-	for (let i = 0; i < CFG.MAX_PAX; i++) paxMesh.setColorAt(i, COL_OUT);
+	for (let i = 0; i < CFG.MAX_PAX_DETAIL; i++) paxMesh.setColorAt(i, COL_OUT);
 	paxMesh.count = 0;
 	scene.add(paxMesh);
 }
@@ -2052,7 +2056,7 @@ function pickGate() {
 }
 
 function addPax(dir, plat, track, x, y, z, born) {
-	if (R.pax.length >= CFG.MAX_PAX) return null;
+	if (R.pax.length >= paxLimit()) return null;
 	const p = newPax();
 	p.dir = dir; p.plat = plat; p.track = track;
 	p.x = x; p.y = y; p.z = z;
@@ -2060,6 +2064,7 @@ function addPax(dir, plat, track, x, y, z, born) {
 	p.born = born === undefined ? R.now : born;
 	p.ph = Math.random() * 6.283;
 	p.head = dir === 0 ? 0 : Math.PI;
+	p.spd = 0.78 + Math.random() * 0.44;   // 歩く速さの個人差
 	// 優等が走っているときだけ「速い列車を待つ」客が現れる
 	p.pref = (dir === 1 && R.hasFast && Math.random() < CFG.FAST_SHARE) ? 1 : 0;
 	const pal = dir === 0 ? PAL_OUT : PAL_IN;
@@ -2252,13 +2257,22 @@ function updatePax(dt) {
 			pool[idx] = start + hw;
 			p.gotRes = true;
 			p.until = start;
+			// 自分の前に何人いるか。詳細モードでは実際にその人数ぶん後ろに並ぶ
 			const ahead = Math.max(0, Math.ceil((start - R.now) / hw));
-			// 行列は来た方向へ伸ばす
-			const back = Math.min(ahead * 0.75, 40);
 			const qx = node.qx || 0;
 			const qz = node.qz !== undefined ? node.qz : (qx ? 0 : (p.dir === 0 ? -1 : 1));
-			p.sx = node.x + qx * back;
-			p.sz = node.z + qz * back;
+			if (detail()) {
+				// 1列が長くなりすぎたら折り返して、通路を塞ぎきらないようにする
+				const perLane = 14;
+				const lane = Math.floor(ahead / perLane) % 4;
+				const along = (ahead % perLane) * CFG.QUEUE_PITCH + 0.4;
+				p.sx = node.x + (qx ? qx * along : (lane - 1.5) * 0.62);
+				p.sz = node.z + (qx ? (lane - 1.5) * 0.62 : qz * along);
+			} else {
+				const back = Math.min(ahead * 0.75, 40);
+				p.sx = node.x + qx * back;
+				p.sz = node.z + qz * back;
+			}
 			if (start > R.now) { p.state = 'queue'; continue; }
 		}
 
@@ -2290,7 +2304,7 @@ function stepTo(p, tx, ty, tz, dt, climb) {
 	// 階段は昇降に時間がかかる
 	const spd = climb
 		? Math.hypot(9, CFG.CONC_Y - CFG.PLAT_Y) / CFG.STAIR_CLIMB * (S.esc ? 1.6 : 1)
-		: CFG.WALK * crowdFactor(p);
+		: CFG.WALK * crowdFactor(p) * (p.spd || 1);
 	const move = spd * dt;
 	if (d <= move || d < 0.05) {
 		p.x = tx; p.y = ty; p.z = tz;
@@ -2343,6 +2357,10 @@ function demandPerSec() {
 	return d.in + d.out;
 }
 
+// 等倍(またはごく低速)なら詳細モード
+function detail() { return R.speed > 0 && R.speed <= CFG.DETAIL_SPEED; }
+function paxLimit() { return detail() ? CFG.MAX_PAX_DETAIL : CFG.MAX_PAX; }
+
 function updateDemand(dt) {
 	// この先しばらくに乗れるスジが1本も無ければ、そもそも客は駅に来ない。
 	// 白紙スタートで「列車が無ければ客も来ない」を成立させる
@@ -2353,8 +2371,9 @@ function updateDemand(dt) {
 	}
 
 	const dm = demandNow();
-	// エージェント数が上限に近づいたら1人=N人にスケール
-	const want = Math.ceil((dm.in + dm.out) * 220 / CFG.MAX_PAX);
+	// 等倍のときは1体=1人。高速再生では上限に収まるようスケールする
+	const lim = detail() ? CFG.MAX_PAX_DETAIL : CFG.MAX_PAX;
+	const want = Math.ceil((dm.in + dm.out) * 220 / lim);
 	R.paxScale = Math.max(1, want);
 
 	// 降車客は列車が運んでくる。運んでくる列車が無いなら溜めない
@@ -2368,7 +2387,7 @@ function updateDemand(dt) {
 	}
 
 	// 満員なら1回も生成できないので、行き先の選定は生成できるときだけ行う
-	while (R.inQHead < R.inQ.length && R.pax.length < CFG.MAX_PAX) {
+	while (R.inQHead < R.inQ.length && R.pax.length < paxLimit()) {
 		const track = pickBoardTrack();
 		if (track < 0) break;
 		const p = isUnder()
@@ -3339,7 +3358,7 @@ function renderLog() {
 
 /* ================= 描画 ================= */
 function renderPax() {
-	const n = Math.min(R.pax.length, CFG.MAX_PAX);
+	const n = Math.min(R.pax.length, paxLimit());
 	const t = R.now;
 	for (let i = 0; i < n; i++) {
 		const p = R.pax[i];
