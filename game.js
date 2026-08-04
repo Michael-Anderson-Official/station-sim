@@ -506,8 +506,11 @@ function defaultState() {
 		nTrack: 1,            // 線路本数(番線)
 		lines: 1,             // 本線の数(駅の外へ出ていく線路)
 		trackLine: [0],       // 番線 → どの本線に属するか
+		trackDir: [],         // 番線 → 進行方向 0=北行き(+Zへ発車) / 1=南行き
 		tseed: [],            // 番線の永続ID。線路を敷き替えても番号が動かないための種セル
 		nextTid: 1,
+		runs: [],             // 1本ずつ置いたスジ [{id,m,cars,ty,track,at(分),dwell}]
+		runId: 1,
 		platW: 6,             // ホーム幅
 		stairs: 0,            // 各ホームの階段数(地平駅では0)
 		esc: false,           // エスカレーター化
@@ -1654,8 +1657,13 @@ function buildTrainMesh(cars, bandCol) {
 // 列車が場外に待避する距離
 function trainOffZ() { return G.platLen / 2 + CFG.APPROACH_LEN + 40; }
 
-// 停止位置(編成中心)。ホーム北端=改札寄りに前を揃える
-function stopZOf(cars) { return G.platZ1 - cars * CFG.CAR_LEN / 2; }
+/* 停止位置(編成中心)。先頭を進行方向の端に揃えるので、上りと下りで逆になる */
+function stopZOf(cars, dir) {
+	const half = cars * CFG.CAR_LEN / 2;
+	return dir ? G.platZ0 + half : G.platZ1 - half;
+}
+// 進行方向の符号。+Z へ発車するなら +1
+function dirSign(dir) { return dir ? -1 : 1; }
 
 // 停止位置からのオフセットを返す純関数。900倍速でサブステップが飛んでも行き過ぎない
 function trainOffset(tr, now) {
@@ -1670,7 +1678,8 @@ function trainOffset(tr, now) {
 
 function launchTrain(e) {
 	const tr = {
-		dia: e.dia, track: e.track, cars: e.cars, mid: e.m, ty: e.ty,
+		dia: e.dia, run: e.run, track: e.track, cars: e.cars, mid: e.m, ty: e.ty,
+		dir: dirOf(e.track),
 		tArr: R.now + (e.arr - S.t), tDep: R.now + (e.dep - S.t),
 		cap: e.cap, flow: e.flow, fare: e.fare,
 		room: 0, boardAcc: 0, alightLeft: 0,
@@ -1689,7 +1698,7 @@ function launchTrain(e) {
 function attachTrainMesh(tr) {
 	const m = modelOf(tr.mid);
 	tr.mesh = buildTrainMesh(tr.cars, m.band);
-	tr.mesh.position.set(trackX(tr.track), 0, stopZOf(tr.cars));
+	tr.mesh.position.set(trackX(tr.track), 0, stopZOf(tr.cars, tr.dir));
 	trainGroup.add(tr.mesh);
 }
 
@@ -1714,10 +1723,22 @@ function lineOf(track) {
 	const a = S.trackLine || [];
 	return Math.min(S.lines - 1, Math.max(0, a[track] === undefined ? track % S.lines : a[track]));
 }
-// 番線が足りているか。1本線に2番線あれば本線の60秒間隔を出しきれる
-function lineTracks(line) {
+// 番線の進行方向。0=北行き(+Zへ発車) / 1=南行き
+function dirOf(track) { return (S.trackDir && S.trackDir[track]) ? 1 : 0; }
+const DIR_NAME = ['北行き', '南行き'];
+
+/* 発車間隔を共有する単位。実際の上り本線・下り本線に相当する。
+   同じ本線でも方向が違えば別の線路なので、間隔は競合しない */
+function groupOf(track) { return lineOf(track) * 2 + dirOf(track); }
+
+// その本線・方向に何番線あるか。2つあれば交互発車で本線の上限を出しきれる
+function lineTracks(line, dir) {
 	let n = 0;
-	for (let t = 0; t < S.nTrack; t++) if (lineOf(t) === line) n++;
+	for (let t = 0; t < S.nTrack; t++) {
+		if (lineOf(t) !== line) continue;
+		if (dir !== undefined && dirOf(t) !== dir) continue;
+		n++;
+	}
 	return n;
 }
 
@@ -1750,6 +1771,25 @@ function compileSched() {
 		}
 	}
 
+	/* 1本だけ置いたスジ＝臨時列車。他社から1本借りる扱いなので契約は要らず、
+	   代わりに走った日だけ運行料を払う。パターンと同じ形に均して以降の検証を共通で通す */
+	for (const r of (S.runs || [])) {
+		const mo = modelOf(r.m);
+		const bad = [];
+		if (r.cars > S.cars) bad.push('ホーム有効長' + S.cars + '両では' + r.cars + '両は着けられない');
+		if (r.track >= S.nTrack) bad.push((r.track + 1) + '番線が無い');
+		if (S.rank < mo.rank) bad.push(mo.name + 'は' + RANKS[mo.rank].name + 'から');
+		if (bad.length) { issues.push({ run: r.id, msg: bad.join(' / ') }); continue; }
+		const arr = ((r.at % 1440) + 1440) % 1440 * 60;
+		out.push({
+			run: r.id, m: r.m, cars: r.cars, ty: r.ty, track: r.track,
+			arr: arr, dep: arr + Math.max(15, r.dwell), spawn: arr - CFG.SPAWN_LEAD,
+			cap: slotCap(r.m, r.cars), flow: slotFlow(r.m, r.cars),
+			fare: typeFits(r.m, r.ty) ? TYPES[r.ty].fareMul : 1.0,
+			fits: typeFits(r.m, r.ty), ok: true,
+		});
+	}
+
 	// 2a. 同一番線の占有は「到着順」で見る。停車時間が違うと発車順では判定を誤る
 	const byArr = out.slice().sort((a, b) => a.arr - b.arr);
 	const lastOnTrack = [];
@@ -1757,7 +1797,7 @@ function compileSched() {
 		const prevT = lastOnTrack[s.track];
 		if (prevT !== undefined && s.arr < prevT.dep + CFG.OCC_IN) {
 			s.ok = false;
-			issues.push({ dia: s.dia, at: s.arr, msg: (s.track + 1) + '番線が塞がっている' });
+			issues.push({ dia: s.dia, run: s.run, at: s.arr, msg: (s.track + 1) + '番線が塞がっている' });
 			continue;                       // 失格スジは番線を塞いだ扱いにしない
 		}
 		lastOnTrack[s.track] = s;
@@ -1773,27 +1813,29 @@ function compileSched() {
 	for (const s of out) {
 		if (!s.ok) continue;
 		s.line = lineOf(s.track);
+		s.dir = dirOf(s.track);
+		s.grp = groupOf(s.track);
 
 		const pd = lastDepTrack[s.track];
 		if (pd !== undefined && s.dep - pd < CFG.TRACK_HEAD) {
 			s.ok = false;
-			issues.push({ dia: s.dia, at: s.dep, msg: (s.track + 1) + '番線は' + Math.round(CFG.TRACK_HEAD / 60) + '分に1本まで' });
+			issues.push({ dia: s.dia, run: s.run, at: s.dep, msg: (s.track + 1) + '番線は' + Math.round(CFG.TRACK_HEAD / 60) + '分に1本まで' });
 			continue;
 		}
 
-		const p = lastOnLine[s.line];
+		const p = lastOnLine[s.grp];
 		if (p) {
 			const need = Math.max(CFG.LINE_HEAD, headwayFor(p.ty, s.ty));
 			if (s.dep - p.dep < need) {
 				s.ok = false;
 				const why = p.ty === s.ty
-					? '本線' + (s.line + 1) + 'は' + Math.round(need / 60) + '分に1本まで'
+					? '本線' + (s.line + 1) + ' ' + DIR_NAME[s.dir] + 'は' + Math.round(need / 60) + '分に1本まで'
 					: TYPES[p.ty].name + 'の' + Math.round(need / 60) + '分後まで' + TYPES[s.ty].name + 'は発車できない';
-				issues.push({ dia: s.dia, at: s.dep, msg: why });
+				issues.push({ dia: s.dia, run: s.run, at: s.dep, msg: why });
 				continue;
 			}
 		}
-		lastOnLine[s.line] = s;
+		lastOnLine[s.grp] = s;
 		lastDepTrack[s.track] = s.dep;
 	}
 
@@ -1801,7 +1843,7 @@ function compileSched() {
 	//    折返し CFG.TURN を空けて次のスジに就ける
 	const pool = {};
 	for (const f of S.fleet) pool[f.m + '/' + f.cars] = new Array(f.n).fill(-1e9);
-	const liveByArr = out.filter(s => s.ok).sort((a, b) => a.arr - b.arr);
+	const liveByArr = out.filter(s => s.ok && s.run === undefined).sort((a, b) => a.arr - b.arr);
 	let usedPeak = 0, busyNow = [];
 	for (const s of liveByArr) {
 		const key = s.m + '/' + s.cars;
@@ -1812,7 +1854,7 @@ function compileSched() {
 		for (let i = 1; i < free.length; i++) if (free[i] < free[bi]) bi = i;
 		if (free[bi] > s.arr - CFG.SPAWN_LEAD) {
 			s.ok = false;
-			issues.push({ dia: s.dia, at: s.arr, msg: modelOf(s.m).name + s.cars + '両の編成が足りない' });
+			issues.push({ dia: s.dia, run: s.run, at: s.arr, msg: modelOf(s.m).name + s.cars + '両の編成が足りない' });
 			continue;
 		}
 		free[bi] = s.dep + CFG.TURN;
@@ -1822,7 +1864,10 @@ function compileSched() {
 
 	// 4. 所要編成数(同時に線路上に居る本数の最大)をスイープラインで求める
 	const ev = [];
-	for (const s of live) { ev.push([s.arr - CFG.SPAWN_LEAD, 1]); ev.push([s.dep + CFG.TURN, -1]); }
+	for (const s of live) {
+		if (s.run !== undefined) continue;              // 臨時は自前の編成を使わない
+		ev.push([s.arr - CFG.SPAWN_LEAD, 1]); ev.push([s.dep + CFG.TURN, -1]);
+	}
 	ev.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
 	let cur = 0, peak = 0;
 	for (const e of ev) { cur += e[1]; if (cur > peak) peak = cur; }
@@ -1925,8 +1970,10 @@ function updateTrains(dt) {
 				}
 			} else {
 				tr.gone = true;
-				// 運行費は発車ごとに掛かる。本数を増やせば増えるほど重くなる
-				const run = tr.cars * CFG.RUN_PER_CAR * (1 + tr.ty * 0.18);
+				// 運行費は発車ごとに掛かる。本数を増やせば増えるほど重くなる。
+				// 臨時列車は自前の編成ではないので、1本走るごとに借り賃も乗る
+				const run = tr.cars * CFG.RUN_PER_CAR * (1 + tr.ty * 0.18)
+					+ (tr.run !== undefined ? runFee(tr.mid, tr.cars) : 0);
 				S.money -= run; S.todayRun = (S.todayRun || 0) + run;
 				// 積み残しは「本数」で数える。人数を足すと finishPax の 240秒/本 が破綻する。
 				// その列車に乗れたはずの志向の客にだけ1本ぶん記録する
@@ -1945,7 +1992,7 @@ function updateTrains(dt) {
 			}
 		}
 
-		if (tr.mesh) tr.mesh.position.z = stopZOf(tr.cars) + trainOffset(tr, now);
+		if (tr.mesh) tr.mesh.position.z = stopZOf(tr.cars, tr.dir) + trainOffset(tr, now) * dirSign(tr.dir);
 		if (tr.gone && trainOffset(tr, now) > CFG.APPROACH_LEN) {
 			// ジオメトリは全編成で共有しているので破棄しない
 			if (tr.mesh) trainGroup.remove(tr.mesh);
@@ -2443,6 +2490,18 @@ function fleetLease() {
 	return n;
 }
 
+/* 臨時列車(単発スジ)1本あたりの運行料。
+   1日8本ぶんでちょうど1編成のリース料になる。数本なら断然安く、
+   終日走らせるなら自前で契約したほうが安い、という分かれ目 */
+function runFee(mid, cars) { return Math.round(contractLease(mid, cars) / 8); }
+
+// 今日走る予定の臨時列車の借り賃合計(UIの見積り用。実際は発車ごとに引かれる)
+function runFeeTotal() {
+	let n = 0;
+	for (const s of (R.sched || [])) if (s.run !== undefined) n += runFee(s.m, s.cars);
+	return n;
+}
+
 function endOfDay() {
 	const cost = dailyCost();
 	S.money -= cost;
@@ -2505,6 +2564,13 @@ function load() {
 		if (!Array.isArray(S.dia)) S.dia = [];
 		S.diaId = Math.max(1, S.diaId | 0);
 		for (const d of S.dia) if (d.id >= S.diaId) S.diaId = d.id + 1;
+		// 方向が無かった頃のセーブ。全番線を北行きにすると発車間隔が急にきつくなるので、
+		// 実際の島式ホームと同じく、番線の偶数奇数で上下に振り分ける
+		if (!Array.isArray(S.trackDir)) S.trackDir = [];
+		for (let t = 0; t < S.nTrack; t++) if (S.trackDir[t] === undefined) S.trackDir[t] = t % 2;
+		if (!Array.isArray(S.runs)) S.runs = [];
+		S.runId = Math.max(1, S.runId | 0);
+		for (const r of S.runs) if (r.id >= S.runId) S.runId = r.id + 1;
 		S.nPlat = Math.max(1, Math.min(10, Math.round(S.nPlat)));
 		S.nTrack = Math.max(1, Math.min(S.nPlat * 2, Math.round(S.nTrack)));
 		S.stairs = Math.max(0, Math.round(S.stairs));
@@ -2593,10 +2659,10 @@ const UPGRADES = [
 	},
 	{
 		id: 'line', ic: '🧭', name: '本線を増設',
-		desc: () => '駅の外へ出ていく線路を1本増やす。本線は' + Math.round(CFG.LINE_HEAD / 60)
-			+ '分に1本まで発車でき、1本線に2番線を交互に使うとその上限を出しきれる。現在 '
+		desc: () => '駅の外へ出ていく線路を1本増やす。本線は上り下りそれぞれ' + Math.round(CFG.LINE_HEAD / 60)
+			+ '分に1本まで発車でき、同じ向きに2番線を交互に使うとその上限を出しきれる。現在 '
 			+ S.lines + '本線 / 番線' + S.nTrack + '（理論上限 '
-			+ Math.min(S.lines * 3600 / CFG.LINE_HEAD, S.nTrack * 3600 / CFG.TRACK_HEAD) + '本/時）',
+			+ Math.min(S.lines * 2 * 3600 / CFG.LINE_HEAD, S.nTrack * 3600 / CFG.TRACK_HEAD) + '本/時）',
 		cost: () => 18000000 * Math.pow(1.55, S.lines - 1),
 		can: () => S.lines < CFG.MAX_LINES && S.nTrack > S.lines,
 		ng: () => S.lines >= CFG.MAX_LINES ? '上限' : '先に番線を増設',
@@ -2608,7 +2674,8 @@ const UPGRADES = [
 		cost: () => 3200000 * Math.pow(1.30, S.nTrack - 1),
 		can: () => S.nTrack < S.nPlat * 2,
 		ng: () => '先にホームを増設',
-		apply: () => { S.nTrack++; },
+		// 増設した番線は反対方向を初期値にする。島式ホームの上下1本ずつと同じ
+		apply: () => { S.trackDir[S.nTrack] = S.nTrack % 2; S.nTrack++; },
 	},
 	{
 		id: 'plat', ic: '🏗', name: 'ホームを増設',
@@ -2767,6 +2834,7 @@ function resetRuntimeForLayout() {
    番線別のタイムライン。帯は展開されたスジ、編集の実体はパターン(S.dia) */
 const DIA = {
 	open: false, tab: 'dia', sel: null,
+	track: 0,                // 編集中の番線(-1 = 全て)
 	t0: 5 * 60 - 4 * 60,     // 表示開始(4:00起点の分)
 	span: 60,                // 表示幅(分)
 	cv: null, ctx: null, w: 0, h: 0, dpr: 1,
@@ -2826,13 +2894,16 @@ function drawDia() {
 		g.fillText(clockOf(mn), x, 9);
 	}
 
-	// 番線のレーン
+	// 番線のレーン。選択中の番線だけ明るくして、どこを編集しているか分かるようにする
 	for (let t = 0; t < diaLaneCount(); t++) {
-		const y = AXIS_H + t * LANE_H;
-		g.fillStyle = t % 2 ? 'rgba(255,255,255,.035)' : 'rgba(255,255,255,.015)';
+		const y = AXIS_H + t * LANE_H, on = DIA.track === t;
+		g.fillStyle = on ? 'rgba(47,125,224,.16)' : t % 2 ? 'rgba(255,255,255,.035)' : 'rgba(255,255,255,.015)';
 		g.fillRect(LABEL_W, y, w - LABEL_W, LANE_H);
-		g.fillStyle = 'rgba(220,232,246,.8)'; g.textAlign = 'left'; g.font = 'bold 10px system-ui, sans-serif';
-		g.fillText((t + 1) + '番', 3, y + LANE_H / 2);
+		g.fillStyle = on ? '#8fc4ff' : 'rgba(220,232,246,.8)';
+		g.textAlign = 'left'; g.font = 'bold 10px system-ui, sans-serif';
+		g.fillText((t + 1) + '番', 3, y + LANE_H / 2 - 4);
+		g.font = '9px system-ui, sans-serif'; g.fillStyle = 'rgba(220,232,246,.45)';
+		g.fillText(dirOf(t) === 1 ? '↓南' : '↑北', 3, y + LANE_H / 2 + 6);
 	}
 
 	// スジの帯
@@ -2844,7 +2915,8 @@ function drawDia() {
 		const x0 = minToX(a), x1 = Math.max(minToX(d), x0 + 9);
 		const y = AXIS_H + s.track * LANE_H + 4;
 		const T = TYPES[s.ty];
-		const on = DIA.sel === s.dia;
+		const on = DIA.sel === slotKey(s);
+		g.globalAlpha = (DIA.track < 0 || DIA.track === s.track) ? 1 : 0.32;
 		g.fillStyle = s.ok ? '#' + T.col.toString(16).padStart(6, '0') : '#7a2f2a';
 		g.beginPath();
 		if (g.roundRect) g.roundRect(x0, y, x1 - x0, LANE_H - 8, 3); else g.rect(x0, y, x1 - x0, LANE_H - 8);
@@ -2854,6 +2926,12 @@ function drawDia() {
 			g.fillStyle = 'rgba(16,22,29,.9)'; g.textAlign = 'center'; g.font = 'bold 9px system-ui, sans-serif';
 			g.fillText(T.abbr, (x0 + x1) / 2, y + (LANE_H - 8) / 2);
 		}
+		// 単発スジは上辺に印を付けて、パターンと見分けられるようにする
+		if (s.run !== undefined) {
+			g.fillStyle = 'rgba(255,255,255,.85)';
+			g.fillRect(x0, y - 2, Math.max(4, x1 - x0), 2);
+		}
+		g.globalAlpha = 1;
 	}
 
 	// 現在時刻
@@ -2866,6 +2944,9 @@ function drawDia() {
 	const el = document.getElementById('diaClock');
 	if (el) el.textContent = clockOf(DIA.t0) + ' 〜 ' + clockOf(DIA.t0 + DIA.span);
 }
+
+// 選択の識別子。パターンと単発はIDが別空間なので接頭辞を付ける
+function slotKey(s) { return s.run !== undefined ? 'r' + s.run : 'd' + s.dia; }
 
 // 指の位置にあるスジ
 function diaHit(x, y) {
@@ -2897,9 +2978,15 @@ function initDiaCanvas() {
 		const hit = diaHit(x, y);
 		last = { x: x, y: y, mn: xToMin(x) };
 		if (hit) {
-			DIA.sel = hit.dia;
-			const d = S.dia.find(p => p.id === hit.dia);
-			DIA.drag = d ? { pat: d, off0: d.off || 0, mn0: xToMin(x) } : null;
+			DIA.sel = slotKey(hit);
+			if (DIA.track >= 0) DIA.track = hit.track;   // 掴んだ帯の番線に切り替える
+			if (hit.run !== undefined) {
+				const r = S.runs.find(p => p.id === hit.run);
+				DIA.drag = r ? { run: r, at0: r.at, mn0: xToMin(x) } : null;
+			} else {
+				const d = S.dia.find(p => p.id === hit.dia);
+				DIA.drag = d ? { pat: d, off0: d.off || 0, mn0: xToMin(x) } : null;
+			}
 			renderDiaList();
 		} else {
 			DIA.drag = null;
@@ -2912,11 +2999,17 @@ function initDiaCanvas() {
 		const r = cv.getBoundingClientRect();
 		const x = e.clientX - r.left;
 		if (DIA.drag) {
-			// パターン全体をずらす
-			const d = DIA.drag.pat;
 			const delta = Math.round(xToMin(x) - DIA.drag.mn0);
-			const ev = Math.max(1, d.every);
-			d.off = ((DIA.drag.off0 + delta) % ev + ev) % ev;
+			if (DIA.drag.run) {
+				// 単発スジはその1本だけを動かす
+				const r = DIA.drag.run;
+				r.at = ((DIA.drag.at0 + delta) % 1440 + 1440) % 1440;
+			} else {
+				// パターンは全体をずらす
+				const d = DIA.drag.pat;
+				const ev = Math.max(1, d.every);
+				d.off = ((DIA.drag.off0 + delta) % ev + ev) % ev;
+			}
 			diaCompileSoon();
 			drawDia();
 		} else {
@@ -2933,7 +3026,8 @@ function initDiaCanvas() {
 	cv.addEventListener('pointercancel', end);
 }
 
-/* ---- パターン一覧とインスペクタ ---- */
+/* ---- スジ一覧とインスペクタ ----
+   ダイヤは番線ごとに編集する。上のタブで番線を選ぶと、その番線のスジだけが並ぶ */
 function patLabel(d) {
 	const m = modelOf(d.m);
 	return m.name + ' ' + d.cars + '両';
@@ -2942,63 +3036,176 @@ function patSub(d) {
 	return (d.track + 1) + '番線 / ' + clockOf(d.from) + '〜' + clockOf(d.to)
 		+ ' / ' + d.every + '分毎 / 停車' + d.dwell + '秒';
 }
-
-function renderDiaList() {
-	const el = document.getElementById('diaList');
-	if (!el) return;
-	el.innerHTML = '';
-	const badIds = {};
-	for (const it of R.issues) badIds[it.dia] = true;
-
-	for (const d of S.dia) {
-		const row = document.createElement('div');
-		row.className = 'diaRow' + (DIA.sel === d.id ? ' sel' : '') + (badIds[d.id] ? ' bad' : '');
-		const T = TYPES[d.ty];
-		row.innerHTML =
-			'<span class="ty" style="background:#' + T.col.toString(16).padStart(6, '0') + '">' + T.abbr + '</span>' +
-			'<span class="tx"><b>' + patLabel(d) + '</b><span>' + patSub(d) + '</span></span>';
-		const del = document.createElement('button');
-		del.className = 'del'; del.textContent = '✕';
-		del.onclick = ev => {
-			ev.stopPropagation();
-			S.dia = S.dia.filter(x => x.id !== d.id);
-			if (DIA.sel === d.id) DIA.sel = null;
-			compileSched(); renderDiaList(); drawDia(); save();
-		};
-		row.appendChild(del);
-		row.onclick = () => { DIA.sel = DIA.sel === d.id ? null : d.id; renderDiaList(); drawDia(); };
-		el.appendChild(row);
-
-		if (DIA.sel === d.id) el.appendChild(buildInspector(d));
-	}
-	if (!S.dia.length) {
-		el.innerHTML = '<p class="hint">パターンがありません。まず「契約」タブで編成を契約してから、下の＋で追加してください。</p>';
-	}
-	if (S.nTrack > 1 || S.lines > 1) el.appendChild(buildLineMap());
-	renderDiaStat();
+function runSub(r) {
+	return (r.track + 1) + '番線 / ' + clockOf(r.at) + '着 '
+		+ clockOf(r.at + Math.max(15, r.dwell) / 60) + '発 / 臨時 '
+		+ yen(runFee(r.m, r.cars)) + '/本';
 }
 
-/* 番線がどの本線に属するか。1本線に2番線を割り当てると1分間隔が出せる */
-function buildLineMap() {
-	const box = document.createElement('div');
-	box.style.cssText = 'background:rgba(0,0,0,.22);border-radius:9px;padding:8px 9px;margin-top:8px;';
-	const cap = Math.min(S.lines * 3600 / CFG.LINE_HEAD, S.nTrack * 3600 / CFG.TRACK_HEAD);
-	box.innerHTML = '<p class="hint" style="margin:0 0 6px">番線と本線の割り当て　'
-		+ '<b style="color:#7ee0a0">理論上限 ' + cap + '本/時</b></p>';
-	for (let t = 0; t < S.nTrack; t++) {
-		box.appendChild(stepper((t + 1) + '番線', () => lineOf(t),
+// 臨時に借りられる編成。契約と違って解禁済みなら何でも1本から呼べる
+function runCombos() {
+	const out = [];
+	for (const m of MODELS) {
+		if (S.rank < m.rank) continue;
+		for (const c of m.cars) if (c <= S.cars) out.push({ m: m.id, cars: c });
+	}
+	return out;
+}
+
+function renderTrackTabs() {
+	const el = document.getElementById('diaTracks');
+	if (!el) return;
+	el.innerHTML = '';
+	const mk = (t, label) => {
+		const b = document.createElement('button');
+		b.textContent = label;
+		if (DIA.track === t) b.className = 'on';
+		b.onclick = () => { DIA.track = t; renderDiaList(); drawDia(); };
+		el.appendChild(b);
+	};
+	mk(-1, '全て');
+	for (let t = 0; t < S.nTrack; t++) mk(t, (t + 1) + '番');
+}
+
+/* 選んだ番線の設定。進行方向と所属本線はここで決める。
+   方向が違う番線は別の線路なので、発車間隔で競合しない */
+function renderTrackDir() {
+	const el = document.getElementById('diaDir');
+	if (!el) return;
+	el.innerHTML = '';
+	const t = DIA.track;
+	if (t < 0 || t >= S.nTrack) return;
+
+	const dirRow = document.createElement('div');
+	dirRow.className = 'stepRow';
+	dirRow.innerHTML = '<span>進行方向</span>';
+	for (let d = 0; d < 2; d++) {
+		const b = document.createElement('button');
+		b.className = 'wide';
+		b.textContent = (d ? '↓ ' : '↑ ') + DIR_NAME[d];
+		const on = dirOf(t) === d;
+		b.style.background = on ? '#2f7de0' : 'rgba(255,255,255,.1)';
+		b.onclick = () => {
+			if (!S.trackDir) S.trackDir = [];
+			S.trackDir[t] = d;
+			compileSched(); renderDiaList(); drawDia(); save();
+		};
+		dirRow.appendChild(b);
+	}
+	el.appendChild(dirRow);
+
+	if (S.lines > 1) {
+		el.appendChild(stepper('本線', () => lineOf(t),
 			v => {
 				const n = S.lines;
 				if (!S.trackLine) S.trackLine = [];
 				S.trackLine[t] = ((v % n) + n) % n;
 			}, v => '本線' + (v + 1)));
 	}
+
+	const note = document.createElement('p');
+	note.className = 'hint';
+	note.style.margin = '2px 2px 6px';
+	const same = lineTracks(lineOf(t), dirOf(t));
+	note.textContent = '本線' + (lineOf(t) + 1) + 'の' + DIR_NAME[dirOf(t)] + 'に割り当てた番線は'
+		+ same + '本。この番線は' + Math.round(CFG.TRACK_HEAD / 60) + '分に1本まで、'
+		+ '同じ向きの番線を合わせて' + Math.round(CFG.LINE_HEAD / 60) + '分に1本まで発車できます。';
+	el.appendChild(note);
+}
+
+function renderDiaList() {
+	const el = document.getElementById('diaList');
+	if (!el) return;
+	if (DIA.track >= S.nTrack) DIA.track = S.nTrack - 1;
+	renderTrackTabs();
+	renderTrackDir();
+	el.innerHTML = '';
+
+	const badD = {}, badR = {};
+	for (const it of R.issues) {
+		if (it.dia !== undefined) badD[it.dia] = true;
+		if (it.run !== undefined) badR[it.run] = true;
+	}
+	const tf = DIA.track;
+	const pats = S.dia.filter(d => tf < 0 || d.track === tf);
+	const runs = S.runs.filter(r => tf < 0 || r.track === tf).slice().sort((a, b) => a.at - b.at);
+
+	const row = (key, ty, title, sub, bad, del) => {
+		const el2 = document.createElement('div');
+		el2.className = 'diaRow' + (DIA.sel === key ? ' sel' : '') + (bad ? ' bad' : '');
+		const T = TYPES[ty];
+		el2.innerHTML =
+			'<span class="ty" style="background:#' + T.col.toString(16).padStart(6, '0') + '">' + T.abbr + '</span>' +
+			'<span class="tx"><b>' + title + '</b><span>' + sub + '</span></span>';
+		const b = document.createElement('button');
+		b.className = 'del'; b.textContent = '✕';
+		b.onclick = ev => { ev.stopPropagation(); del(); };
+		el2.appendChild(b);
+		el2.onclick = () => { DIA.sel = DIA.sel === key ? null : key; renderDiaList(); drawDia(); };
+		el.appendChild(el2);
+		return el2;
+	};
+
+	for (const r of runs) {
+		const key = 'r' + r.id;
+		row(key, r.ty, '⚡ ' + modelOf(r.m).name + ' ' + r.cars + '両', runSub(r), badR[r.id], () => {
+			S.runs = S.runs.filter(x => x.id !== r.id);
+			if (DIA.sel === key) DIA.sel = null;
+			compileSched(); renderDiaList(); drawDia(); save();
+		});
+		if (DIA.sel === key) el.appendChild(buildRunInspector(r));
+	}
+
+	for (const d of pats) {
+		const key = 'd' + d.id;
+		row(key, d.ty, patLabel(d), patSub(d), badD[d.id], () => {
+			S.dia = S.dia.filter(x => x.id !== d.id);
+			if (DIA.sel === key) DIA.sel = null;
+			compileSched(); renderDiaList(); drawDia(); save();
+		});
+		if (DIA.sel === key) el.appendChild(buildInspector(d));
+	}
+
+	if (!pats.length && !runs.length) {
+		el.innerHTML = '<p class="hint">'
+			+ (tf < 0 ? 'スジがありません。' : (tf + 1) + '番線にはまだ何も走っていません。')
+			+ '「＋1本」なら契約なしで1本だけ走らせられます（走った日だけ運行料）。'
+			+ '終日走らせるなら「契約」タブで編成を契約して、パターンで置くほうが安上がりです。</p>';
+	}
+	if (tf < 0 && (S.nTrack > 1 || S.lines > 1)) el.appendChild(buildLineMap());
+	renderDiaStat();
+}
+
+/* 番線がどの本線・どの向きに属するかの一覧。1本線に同じ向きの2番線があると交互発車ができる */
+function buildLineMap() {
+	const box = document.createElement('div');
+	box.style.cssText = 'background:rgba(0,0,0,.22);border-radius:9px;padding:8px 9px;margin-top:8px;';
+	const cap = Math.min(S.lines * 2 * 3600 / CFG.LINE_HEAD, S.nTrack * 3600 / CFG.TRACK_HEAD);
+	box.innerHTML = '<p class="hint" style="margin:0 0 6px">番線の割り当て　'
+		+ '<b style="color:#7ee0a0">理論上限 ' + cap + '本/時</b>（上下の合計）</p>';
+	for (let t = 0; t < S.nTrack; t++) {
+		const p = document.createElement('div');
+		p.className = 'stepRow';
+		p.innerHTML = '<span>' + (t + 1) + '番線</span>'
+			+ '<span class="val" style="min-width:auto;flex:1;text-align:left">本線'
+			+ (lineOf(t) + 1) + ' / ' + (dirOf(t) ? '↓ ' : '↑ ') + DIR_NAME[dirOf(t)] + '</span>';
+		const b = document.createElement('button');
+		b.className = 'wide'; b.textContent = '編集';
+		b.onclick = () => { DIA.track = t; renderDiaList(); drawDia(); };
+		p.appendChild(b);
+		box.appendChild(p);
+	}
 	const note = document.createElement('p');
 	note.className = 'hint';
 	note.style.margin = '6px 2px 0';
 	const per = [];
-	for (let l = 0; l < S.lines; l++) per.push('本線' + (l + 1) + ':' + lineTracks(l) + '番線');
-	note.textContent = per.join(' / ') + '　同じ本線に2番線あると、交互発車で本線の上限まで出せます。';
+	for (let l = 0; l < S.lines; l++) {
+		for (let d = 0; d < 2; d++) {
+			const n = lineTracks(l, d);
+			if (n) per.push('本線' + (l + 1) + DIR_NAME[d] + ':' + n + '本');
+		}
+	}
+	note.textContent = per.join(' / ') + '　同じ本線の同じ向きに2番線あると、交互発車で本線の上限まで出せます。';
 	box.appendChild(note);
 	return box;
 }
@@ -3023,11 +3230,14 @@ function stepper(label, get, set, fmt, step) {
 	return row;
 }
 
-function buildInspector(d) {
+function inspectorBox() {
 	const box = document.createElement('div');
 	box.style.cssText = 'background:rgba(0,0,0,.22);border-radius:9px;padding:8px 9px;margin:-2px 0 8px;';
+	return box;
+}
 
-	// 種別
+// 種別の選択。パターンと単発で共通
+function typeRow(o) {
 	const tyRow = document.createElement('div');
 	tyRow.className = 'stepRow';
 	tyRow.innerHTML = '<span>種別</span>';
@@ -3035,13 +3245,49 @@ function buildInspector(d) {
 		const b = document.createElement('button');
 		b.className = 'wide';
 		b.textContent = T.name;
-		b.style.background = d.ty === T.id ? '#' + T.col.toString(16).padStart(6, '0') : 'rgba(255,255,255,.1)';
-		b.style.color = d.ty === T.id ? '#10161d' : '#e8eef7';
+		b.style.background = o.ty === T.id ? '#' + T.col.toString(16).padStart(6, '0') : 'rgba(255,255,255,.1)';
+		b.style.color = o.ty === T.id ? '#10161d' : '#e8eef7';
 		if (S.rank < T.rank) { b.disabled = true; b.style.opacity = '.4'; b.textContent = T.name + '(未解禁)'; }
-		b.onclick = () => { d.ty = T.id; compileSched(); renderDiaList(); drawDia(); save(); };
+		b.onclick = () => { o.ty = T.id; compileSched(); renderDiaList(); drawDia(); save(); };
 		tyRow.appendChild(b);
 	}
-	box.appendChild(tyRow);
+	return tyRow;
+}
+
+/* 単発スジ(臨時列車)のインスペクタ。契約が要らないぶん、編成は解禁済みなら何でも選べる */
+function buildRunInspector(r) {
+	const box = inspectorBox();
+	box.appendChild(typeRow(r));
+
+	const combos = runCombos();
+	if (combos.length) {
+		const at = Math.max(0, combos.findIndex(c => c.m === r.m && c.cars === r.cars));
+		const pick = v => combos[((v % combos.length) + combos.length) % combos.length];
+		box.appendChild(stepper('編成', () => at,
+			v => { const c = pick(v); r.m = c.m; r.cars = c.cars; },
+			v => modelOf(pick(v).m).name + ' ' + pick(v).cars + '両'));
+	}
+	box.appendChild(stepper('番線', () => r.track,
+		v => { r.track = Math.max(0, Math.min(S.nTrack - 1, v)); DIA.track = r.track; }, v => (v + 1) + '番線'));
+	box.appendChild(stepper('着時刻', () => r.at,
+		v => { r.at = ((v % 1440) + 1440) % 1440; }, clockOf));
+	box.appendChild(stepper('停車', () => r.dwell,
+		v => { r.dwell = Math.max(15, Math.min(300, Math.round(v / 5) * 5)); }, v => v + '秒', 5));
+
+	const info = document.createElement('p');
+	info.className = 'hint';
+	info.style.margin = '6px 2px 0';
+	const fee = runFee(r.m, r.cars);
+	info.textContent = '臨時列車。契約は要らず、1本走らせるごとに借り賃 ' + yen(fee) + '。'
+		+ '定員' + slotCap(r.m, r.cars) + '人。同じ編成を1日8本以上走らせるなら、契約したほうが安くなります（リース '
+		+ yen(contractLease(r.m, r.cars)) + '/日）。';
+	box.appendChild(info);
+	return box;
+}
+
+function buildInspector(d) {
+	const box = inspectorBox();
+	box.appendChild(typeRow(d));
 
 	// 契約済みの「形式×両数」から選ぶ
 	const combos = S.fleet.map(f => ({ m: f.m, cars: f.cars }));
@@ -3058,7 +3304,7 @@ function buildInspector(d) {
 	}
 
 	box.appendChild(stepper('番線', () => d.track,
-		v => { d.track = Math.max(0, Math.min(S.nTrack - 1, v)); }, v => (v + 1) + '番線'));
+		v => { d.track = Math.max(0, Math.min(S.nTrack - 1, v)); DIA.track = d.track; }, v => (v + 1) + '番線'));
 	box.appendChild(stepper('間隔', () => d.every,
 		v => {
 			d.every = Math.max(2, Math.min(240, v));
@@ -3091,9 +3337,12 @@ function buildInspector(d) {
 function renderDiaStat() {
 	const el = document.getElementById('diaStat');
 	if (!el) return;
-	el.innerHTML = '本日 <b>' + R.sched.length + '本</b><br>'
+	const nRun = R.sched.filter(x => x.run !== undefined).length;
+	el.innerHTML = '本日 <b>' + R.sched.length + '本</b>'
+		+ (nRun ? '（臨時' + nRun + '）' : '') + '<br>'
 		+ '所要' + R.need + ' / 契約' + R.have
-		+ (R.short > 0 ? ' <i>' + R.short + '本不足</i>' : '');
+		+ (R.short > 0 ? ' <i>' + R.short + '本不足</i>' : '')
+		+ (nRun ? '<br>臨時の借り賃 ' + yen(runFeeTotal()) + '/日' : '');
 	const is = document.getElementById('diaIssues');
 	if (is) {
 		const seen = {}, lines = [];
@@ -3158,6 +3407,11 @@ function openDia() {
 	R.speed = 0;                       // 編集中は時間を止める
 	document.querySelectorAll('#speed button').forEach(x => x.classList.toggle('active', +x.dataset.speed === 0));
 	if (!DIA.cv) initDiaCanvas();
+	// いまの時刻が画面の外なら、そこへ飛ばす(開くたびに5:00へ戻ると探し直しになる)
+	const nowMn = S.t / 60;
+	if (nowMn < DIA.t0 || nowMn > DIA.t0 + DIA.span) {
+		DIA.t0 = Math.max(0, Math.min(1440 - DIA.span, nowMn - DIA.span * 0.3));
+	}
 	diaResize();
 	renderDiaList(); renderFleet(); drawDia();
 }
@@ -3195,6 +3449,29 @@ function initDiaUI() {
 		};
 	});
 
+	document.getElementById('diaAddOne').onclick = () => {
+		const combos = runCombos();
+		if (!combos.length) return;
+		const tr = Math.max(0, Math.min(S.nTrack - 1, DIA.track));
+		// 画面の中央の時刻に置く。既にスジがあれば重ならないところまでずらす
+		let at = Math.round(DIA.t0 + DIA.span / 2);
+		const used = S.runs.filter(r => r.track === tr).map(r => r.at)
+			.concat((R.allSlots || []).filter(x => x.track === tr).map(x => Math.round(x.arr / 60)));
+		for (let k = 0; k < 240 && used.indexOf(((at % 1440) + 1440) % 1440) >= 0; k++) at++;
+		const prev = S.runs[S.runs.length - 1];
+		const base = prev ? { m: prev.m, cars: prev.cars, ty: prev.ty } : { m: combos[0].m, cars: combos[0].cars, ty: 0 };
+		const r = {
+			id: S.runId++, m: base.m, cars: base.cars, ty: base.ty,
+			track: tr, at: ((at % 1440) + 1440) % 1440, dwell: 45,
+		};
+		if (r.cars > S.cars) { r.m = combos[0].m; r.cars = combos[0].cars; }
+		S.runs.push(r);
+		DIA.sel = 'r' + r.id;
+		DIA.track = tr;
+		compileSched(); renderDiaList(); drawDia(); save();
+		alertOnce('addrun', '臨時列車を1本追加（借り賃 ' + yen(runFee(r.m, r.cars)) + '/本）', true, 4);
+	};
+
 	document.getElementById('diaAdd').onclick = () => {
 		if (!S.fleet.length) {
 			alertOnce('nofleet', '先に「契約」タブで編成を契約してください', false, 5);
@@ -3203,10 +3480,12 @@ function initDiaUI() {
 		const f = S.fleet[0];
 		const d = {
 			id: S.diaId++, m: f.m, cars: f.cars, ty: 0,
-			track: 0, from: 60, to: 20 * 60, every: 30, off: 0, dwell: 45,
+			track: Math.max(0, Math.min(S.nTrack - 1, DIA.track)),
+			from: 60, to: 20 * 60, every: 30, off: 0, dwell: 45,
 		};
 		S.dia.push(d);
-		DIA.sel = d.id;
+		DIA.sel = 'd' + d.id;
+		DIA.track = d.track;
 		compileSched(); renderDiaList(); drawDia(); save();
 	};
 
@@ -3458,6 +3737,8 @@ function boot() {
 		reset: () => { noSave = true; localStorage.removeItem(SAVE_KEY); location.reload(); },
 		// S を直接いじった後に呼ぶ(レイアウト反映)
 		rebuild: () => { resetRuntimeForLayout(); buildStation(); renderUpgrades(); },
+		// ダイヤだけ組み直す(検証結果を見たいとき)
+		compile: () => { compileSched(); return { slots: R.sched.length, issues: R.issues.slice() }; },
 		// 契約: 形式ID, 両数, 本数
 		hire: (mid, cars, n) => {
 			const m = modelOf(mid);

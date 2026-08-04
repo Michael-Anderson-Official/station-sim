@@ -153,10 +153,30 @@ html, body {
 }
 .stepRow .wide { flex: 1; width: auto; font-size: 11px; font-weight: 700; }
 
-#diaAdd {
-	width: 100%; padding: 10px; border: none; border-radius: 9px; margin-top: 2px;
-	background: rgba(47,125,224,.22); color: #8fc4ff; font-size: 12px; font-weight: 800; font-family: inherit;
+/* 番線タブ。増えても横に流れるだけで、他の要素を押し出さない */
+#diaTracks {
+	display: flex; gap: 4px; overflow-x: auto; margin-bottom: 6px;
+	scrollbar-width: none; -webkit-overflow-scrolling: touch;
 }
+#diaTracks::-webkit-scrollbar { display: none; }
+#diaTracks button {
+	flex: none; border: none; background: rgba(255,255,255,.08); color: #cfe0f5;
+	font-family: inherit; font-size: 12px; font-weight: 800;
+	padding: 7px 11px; border-radius: 8px; white-space: nowrap;
+}
+#diaTracks button.on { background: #2f7de0; color: #fff; }
+
+#diaDir { margin-bottom: 4px; }
+#diaDir .stepRow > span:first-child { width: 56px; }
+
+#diaAddRow { display: flex; gap: 6px; margin: 8px 0 2px; }
+#diaAddRow button {
+	flex: 1; padding: 10px 6px; border: none; border-radius: 9px;
+	font-size: 12px; font-weight: 800; font-family: inherit;
+	background: rgba(47,125,224,.22); color: #8fc4ff;
+}
+#diaAddRow #diaAddOne { background: rgba(126,224,160,.2); color: #7ee0a0; }
+#diaAddRow button:active { transform: scale(.97); }
 #diaIssues { margin-top: 8px; }
 #diaIssues div { font-size: 10px; color: #ff9a8a; line-height: 1.6; }
 

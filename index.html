@@ -82,6 +82,8 @@
 	</div>
 
 	<div id="diaPane">
+		<div id="diaTracks"></div>
+		<div id="diaDir"></div>
 		<div id="diaZoom">
 			<button data-span="30">30分</button>
 			<button data-span="60" class="on">1時間</button>
@@ -90,9 +92,12 @@
 			<span id="diaClock"></span>
 		</div>
 		<canvas id="diaCv"></canvas>
-		<p class="hint" id="diaHint">帯を横にドラッグすると、そのパターン全体がずれます。何も無い所をドラッグすると時刻が動きます。</p>
+		<p class="hint" id="diaHint">帯を横にドラッグすると動きます（臨時はその1本だけ、パターンは全体）。何も無い所をドラッグすると時刻が動きます。</p>
+		<div id="diaAddRow">
+			<button id="diaAddOne">⚡ ＋1本（臨時）</button>
+			<button id="diaAdd">＋ パターン</button>
+		</div>
 		<div id="diaList"></div>
-		<button id="diaAdd">＋ パターンを追加</button>
 		<div id="diaIssues"></div>
 	</div>
 
