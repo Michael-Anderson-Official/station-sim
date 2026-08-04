@@ -338,6 +338,46 @@ function rebuildDerived() {
 	return DV;
 }
 
+/* ---- グリーディメッシング ----
+   同じ種別の連結セルを長方形にまとめる。セル単位で箱を置くと継ぎ目が出るうえ、
+   描画コールが数万になる。Z最速索引なのでZへ伸ばしてからXへ広げる */
+function greedyRects(layer, pred) {
+	const W = GRID.W, D = GRID.D;
+	const seen = new Uint8Array(W * D);
+	const out = [];
+	for (let x = 0; x < W; x++) {
+		for (let z = 0; z < D; z++) {
+			if (seen[x * D + z] || !pred(layer, x, z)) continue;
+			let z1 = z;
+			while (z1 + 1 < D && !seen[x * D + z1 + 1] && pred(layer, x, z1 + 1)) z1++;
+			let x1 = x;
+			outer: while (x1 + 1 < W) {
+				for (let zz = z; zz <= z1; zz++) {
+					if (seen[(x1 + 1) * D + zz] || !pred(layer, x1 + 1, zz)) break outer;
+				}
+				x1++;
+			}
+			for (let xx = x; xx <= x1; xx++) for (let zz = z; zz <= z1; zz++) seen[xx * D + zz] = 1;
+			out.push({ x0: x, x1: x1, z0: z, z1: z1 });
+			z = z1;
+		}
+	}
+	return out;
+}
+
+// 長方形(マス) → ワールドの中心と大きさ
+function rectBox(r) {
+	const w = (r.x1 - r.x0 + 1) * GRID.CELL, d = (r.z1 - r.z0 + 1) * GRID.CELL;
+	return {
+		cx: wx(r.x0) - GRID.CELL / 2 + w / 2,
+		cz: wz(r.z0) - GRID.CELL / 2 + d / 2,
+		w: w, d: d,
+	};
+}
+
+// レイヤーの床の高さ
+function layerY(l) { return l === 0 ? 0 : (isUnder() ? -CFG.UNDER_Y : CFG.CONC_Y); }
+
 // 永続ID → 実行時の密インデックス
 function tiOf(tid) {
 	const r = DV.byTid && DV.byTid.get(tid);
@@ -1184,407 +1224,241 @@ function disposeGroup(g) {
 	}
 }
 
+/* ================= 盤面から3Dを組む =================
+   セル単位で箱を置くと継ぎ目と描画コールが破綻するので、
+   連結セルを長方形にまとめてから箱にする。設備だけインスタンス描画 */
 function buildStation() {
 	recalcGeometry();
 	disposeGroup(stationGroup);
 	G.gateArms = [];
+	if (!B.t) gridFromParams();
 
-	const L = G.platLen;
-	const RUN = 10;                        // 階段の水平投影長
-	// 橋上なら正(上り)、地下なら負(下り)
-	const rise = G.entryY - CFG.PLAT_Y;
-	const trackLen = L + 520;
-	const cw = G.concX1 - G.concX0;
+	const LU = hasLink() ? 1 : 0;
+	const uy = layerY(LU);
+	const isRail = (l, x, z) => { const t = tAt(l, x, z); return t === C_RAIL_L || t === C_RAIL_R; };
+	const isPlat = (l, x, z) => tAt(l, x, z) === C_PLAT;
+	const isFloor = (l, x, z) => { const t = tAt(l, x, z); return t === C_FLOOR || t === C_ENTRANCE || t === C_GATE || t === C_SHOP || t === C_VEND; };
+	const isRoof = (l, x, z) => (B.f[gidx(l, x, z)] & F_ROOF) !== 0;
+	const isCross = (l, x, z) => (B.f[gidx(l, x, z)] & F_CROSS) !== 0;
 
-	/* ---- 線路: バラスト・枕木・レール・架線柱 ---- */
-	const sleeperGeo = new THREE.BoxGeometry(2.6, 0.22, 0.9);
+	/* ---- 線路 ---- */
+	const sleeperGeo = new THREE.BoxGeometry(3.4, 0.22, 0.9);
 	const sleepers = [];
-	for (let t = 0; t < S.nTrack; t++) {
-		const x = trackX(t);
-		box(CFG.TRACK_W + 1.0, 0.5, trackLen, MAT.ballast, x, -0.5, 0, stationGroup, true);
-		for (let z = -trackLen / 2; z < trackLen / 2; z += 2.4) sleepers.push([x, 0.11, z]);
-		box(0.12, 0.18, trackLen, MAT.rail, x - 0.7175, 0.22, 0, stationGroup, true);
-		box(0.12, 0.18, trackLen, MAT.rail, x + 0.7175, 0.22, 0, stationGroup, true);
+	for (const r of DV.all) {
+		const b = rectBox({ x0: r.x, x1: r.x + 1, z0: r.z0, z1: r.z1 });
+		box(b.w + 1.0, 0.5, b.d, MAT.ballast, b.cx, -0.5, b.cz, stationGroup, true);
+		for (let z = r.z0; z <= r.z1; z += 1.2) sleepers.push([b.cx, 0.11, wz(z)]);
+		box(0.12, 0.18, b.d, MAT.rail, b.cx - 0.7175, 0.22, b.cz, stationGroup, true);
+		box(0.12, 0.18, b.d, MAT.rail, b.cx + 0.7175, 0.22, b.cz, stationGroup, true);
 	}
 	addInstanced(sleeperGeo, MAT.sleeper, sleepers, stationGroup, false);
 
 	/* ---- ホーム ---- */
+	const platRects = greedyRects(0, isPlat);
+	for (const r of platRects) {
+		const b = rectBox(r);
+		box(b.w, CFG.PLAT_Y, b.d, MAT.plat, b.cx, 0, b.cz, stationGroup);
+		box(b.w + 0.12, CFG.PLAT_Y * 0.75, b.d + 0.1, MAT.platSide, b.cx, 0, b.cz, stationGroup, true);
+		// 線路に面した縁だけ点字ブロックと白線を敷く
+		for (const side of [-1, 1]) {
+			const nx = side < 0 ? r.x0 - 1 : r.x1 + 1;
+			if (!isRail(0, nx, r.z0)) continue;
+			const ex = side < 0 ? wx(r.x0) - GRID.CELL / 2 : wx(r.x1) + GRID.CELL / 2;
+			box(0.6, 0.04, b.d, MAT.tactile, ex - side * 0.75, CFG.PLAT_Y, b.cz, stationGroup, true);
+			box(0.12, 0.045, b.d, MAT.whiteLine, ex - side * 0.18, CFG.PLAT_Y, b.cz, stationGroup, true);
+		}
+	}
+
+	/* ---- 上家(半透明。俯瞰でホームの人が見える) ---- */
+	const roofRects = greedyRects(0, isRoof);
+	const beamGeo = new THREE.BoxGeometry(1, 0.22, 0.3);
 	const pillarGeo = new THREE.BoxGeometry(0.42, CFG.CONC_Y - CFG.PLAT_Y - 0.3, 0.42);
-	const pillars = [];
 	const lampGeo = new THREE.BoxGeometry(0.3, 0.12, 2.4);
-	const lamps = [];
-	const benchGeo = new THREE.BoxGeometry(1.6, 0.45, 0.5);
-	const benches = [];
-	const stepGeo = new THREE.BoxGeometry(2.8, 0.22, RUN / 14 + 0.08);
-	const stepPlates = [];
-	const beamGeo = new THREE.BoxGeometry(S.platW + 1.2, 0.22, 0.3);
-	const beams = [];
-
-	for (let i = 0; i < S.nPlat; i++) {
-		const x = platX(i);
-		// 床と側壁
-		box(S.platW, CFG.PLAT_Y, L, MAT.plat, x, 0, 0, stationGroup);
-		box(S.platW + 0.12, CFG.PLAT_Y * 0.75, L + 0.1, MAT.platSide, x, 0, 0, stationGroup, true);
-		// 点字ブロックと白線(両端)
-		for (const s of [-1, 1]) {
-			box(0.6, 0.04, L, MAT.tactile, x + s * (S.platW / 2 - 0.75), CFG.PLAT_Y, 0, stationGroup, true);
-			box(0.12, 0.045, L, MAT.whiteLine, x + s * (S.platW / 2 - 0.18), CFG.PLAT_Y, 0, stationGroup, true);
+	const pillars = [], lamps = [];
+	for (const r of roofRects) {
+		const b = rectBox(r);
+		// 駅舎に覆われている範囲には架けない
+		const covered = hasLink() && tAt(1, r.x0, r.z0) === C_FLOOR;
+		if (covered) continue;
+		const rf = box(b.w + 1.2, 0.2, b.d, MAT.roof, b.cx, CFG.CONC_Y - 1.2, b.cz, stationGroup, true);
+		rf.renderOrder = 4;
+		for (let z = r.z0 + 2; z <= r.z1 - 1; z += 5) {
+			pillars.push([b.cx, CFG.PLAT_Y + (CFG.CONC_Y - CFG.PLAT_Y - 0.3) / 2, wz(z)]);
+			lamps.push([b.cx, CFG.CONC_Y - 1.75, wz(z) + 2]);
 		}
-		// 上家(屋根)。コンコースに覆われていない範囲だけ架ける
-		const roofZ1 = G.concZ0 - 1;
-		if (roofZ1 > G.platZ0 + 4) {
-			const rl = roofZ1 - G.platZ0;
-			const rc = (G.platZ0 + roofZ1) / 2;
-			const rf = box(S.platW + 1.6, 0.2, rl, MAT.roof, x, CFG.CONC_Y - 1.2, rc, stationGroup, true);
-			rf.renderOrder = 4;
-			// 屋根を支える梁(こちらは実体があるので影を落とす)
-			for (let z = G.platZ0 + 5; z < roofZ1 - 1; z += 5.5) {
-				beams.push([x, CFG.CONC_Y - 1.5, z]);
-			}
-			box(0.25, 0.3, rl, MAT.truss, x - S.platW / 2 - 0.6, CFG.CONC_Y - 1.5, rc, stationGroup, true);
-			box(0.25, 0.3, rl, MAT.truss, x + S.platW / 2 + 0.6, CFG.CONC_Y - 1.5, rc, stationGroup, true);
-			for (let z = G.platZ0 + 5; z < roofZ1 - 2; z += 11) {
-				pillars.push([x, CFG.PLAT_Y + (CFG.CONC_Y - CFG.PLAT_Y - 0.3) / 2, z]);
-				lamps.push([x, CFG.CONC_Y - 1.75, z + 5.5]);
-			}
-			for (let z = G.platZ0 + 9; z < roofZ1 - 6; z += 26) {
-				benches.push([x, CFG.PLAT_Y + 0.225, z]);
-			}
-		}
-		// コンコース下にも柱と照明
-		for (let z = G.concZ0 + 3; z < G.platZ1 - 2; z += 11) {
-			pillars.push([x, CFG.PLAT_Y + (CFG.CONC_Y - CFG.PLAT_Y - 0.3) / 2, z]);
-			lamps.push([x, CFG.CONC_Y - 0.9, z + 5.5]);
-		}
-
-		// 駅名標(ホーム中ほどの柱に掛ける)
-		const signZ = Math.max(G.platZ0 + 8, Math.min(G.platZ1 - 8, (G.platZ0 + G.concZ0) / 2));
-		box(3.4, 0.7, 0.1, MAT.signFace, x, CFG.CONC_Y - 2.6, signZ, stationGroup, true);
-		box(3.6, 0.16, 0.14, MAT.sign, x, CFG.CONC_Y - 2.0, signZ, stationGroup, true);
-
-		/* ---- 階段 / エスカレーター ----
-		   地平駅には無い。橋上なら上り、地下なら下りになる */
-		if (hasStairs()) for (let k = 0; k < S.stairs; k++) {
-			const sz = stairZ(k);
-			const len = Math.hypot(rise, RUN);
-			const ang = -Math.atan2(rise, RUN);
-			if (S.esc) {
-				// トラス + ステップ帯 + 手すり
-				const body = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.75, len), MAT.esc);
-				body.position.set(x, CFG.PLAT_Y + rise / 2, sz - RUN / 2);
-				body.rotation.x = ang;
-				body.castShadow = body.receiveShadow = true;
-				stationGroup.add(body);
-				for (const s of [-1, 1]) {
-					const hr = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.9, len), MAT.handrail);
-					hr.position.set(x + s * 1.45, CFG.PLAT_Y + rise / 2 + 0.6, sz - RUN / 2);
-					hr.rotation.x = ang;
-					hr.castShadow = true;
-					stationGroup.add(hr);
-				}
-			} else {
-				// 段板。1段ずつメッシュにすると10面6基で960個になるのでまとめて置く
-				const steps = 14;
-				for (let s = 0; s < steps; s++) {
-					const f = (s + 0.5) / steps;
-					stepPlates.push([x, CFG.PLAT_Y + rise * f - 0.11, sz - RUN * f]);
-				}
-				for (const s of [-1, 1]) {
-					const hr = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.85, len), MAT.handrail);
-					hr.position.set(x + s * 1.5, CFG.PLAT_Y + rise / 2 + 0.55, sz - RUN / 2);
-					hr.rotation.x = ang;
-					hr.castShadow = true;
-					stationGroup.add(hr);
-				}
-			}
-		}
+		box(0.25, 0.3, b.d, MAT.truss, b.cx - b.w / 2 - 0.3, CFG.CONC_Y - 1.5, b.cz, stationGroup, true);
+		box(0.25, 0.3, b.d, MAT.truss, b.cx + b.w / 2 + 0.3, CFG.CONC_Y - 1.5, b.cz, stationGroup, true);
 	}
 	addInstanced(pillarGeo, MAT.pillar, pillars, stationGroup, true);
 	addInstanced(lampGeo, MAT.lamp, lamps, stationGroup, false);
-	addInstanced(benchGeo, MAT.bench, benches, stationGroup, true);
-	addInstanced(stepGeo, MAT.stair, stepPlates, stationGroup, true);
-	addInstanced(beamGeo, MAT.truss, beams, stationGroup, true);
 
-	/* ---- 架線柱 ---- */
-	if (S.nTrack > 0) {
-		const poleGeo = new THREE.BoxGeometry(0.36, 9.5, 0.36);
-		const poles = [];
-		const xl = trackX(0) - CFG.TRACK_W, xr = trackX(S.nTrack - 1) + CFG.TRACK_W;
-		for (let z = -trackLen / 2 + 30; z < trackLen / 2 - 30; z += 45) {
-			if (z > G.concZ0 - 6 && z < G.concZ1) continue;   // 駅舎の下は省く
-			poles.push([xl, 4.75, z]);
-			poles.push([xr, 4.75, z]);
-		}
-		addInstanced(poleGeo, MAT.catenary, poles, stationGroup, true);
+	/* ---- 駅舎の床 ---- */
+	const floorRects = greedyRects(LU, isFloor);
+	let fx0 = 1e9, fx1 = -1e9, fz0 = 1e9, fz1 = -1e9;
+	for (const r of floorRects) {
+		const b = rectBox(r);
+		fx0 = Math.min(fx0, r.x0); fx1 = Math.max(fx1, r.x1);
+		fz0 = Math.min(fz0, r.z0); fz1 = Math.max(fz1, r.z1);
+		if (LU > 0) box(b.w, 0.6, b.d, MAT.concUnder, b.cx, uy - 0.6, b.cz, stationGroup);
+		const fl = new THREE.Mesh(new THREE.PlaneGeometry(b.w, b.d), MAT.conc);
+		fl.rotation.x = -Math.PI / 2;
+		fl.position.set(b.cx, uy + 0.02, b.cz);
+		fl.receiveShadow = true;
+		stationGroup.add(fl);
 	}
 
-	/* ---- 駅舎 ---- */
-	const EY = G.entryY;
-	const wallH = 3.6;
-	const czc = (G.concZ0 + G.concZ1) / 2;
-
-	if (isBridge()) {
-		// 橋上駅舎: 線路をまたぐ床を張る
-		box(cw, 0.6, G.concD, MAT.concUnder, G.concCx, EY - 0.6, czc, stationGroup);
-	} else if (isUnder()) {
-		// 地下コンコース: 掘り下げた床。地面は buildCity 側でくり抜く
-		box(cw, 0.6, G.concD, MAT.concUnder, G.concCx, EY - 0.6, czc, stationGroup);
+	if (floorRects.length) {
+		const bw = (fx1 - fx0 + 1) * GRID.CELL, bd = (fz1 - fz0 + 1) * GRID.CELL;
+		const bcx = wx(fx0) - GRID.CELL / 2 + bw / 2, bcz = wz(fz0) - GRID.CELL / 2 + bd / 2;
+		const wallH = 3.4;
+		if (hasLink()) {
+			// 橋上/地下は腰壁+ガラス。天井は張らない
+			for (const s of [-1, 1]) {
+				box(0.35, 1.0, bd, MAT.concUnder, bcx + s * bw / 2, uy, bcz, stationGroup);
+				box(0.3, wallH - 1.0, bd, MAT.glass, bcx + s * bw / 2, uy + 1.0, bcz, stationGroup, true);
+				box(bw, 1.0, 0.35, MAT.concUnder, bcx, uy, bcz + s * bd / 2, stationGroup);
+				box(bw, wallH - 1.0, 0.3, MAT.glass, bcx, uy + 1.0, bcz + s * bd / 2, stationGroup, true);
+			}
+			// 橋脚(線路を避けて立てる)
+			if (isBridge()) {
+				for (let x = fx0 + 1; x <= fx1; x += 6) {
+					if (isRail(0, x, fz1)) continue;
+					box(1.2, CFG.CONC_Y - 0.6, 1.2, MAT.pillar, wx(x), 0, wz(fz1 - 1), stationGroup, true);
+				}
+			}
+		} else {
+			// 地平は木造駅舎。下見板張りの壁と切妻の瓦屋根
+			const wh = 3.2;
+			for (const s of [-1, 1]) {
+				box(0.3, wh, bd, MAT.wallWood, bcx + s * bw / 2, uy, bcz, stationGroup);
+			}
+			box(bw, wh, 0.3, MAT.wallWood, bcx, uy, bcz + bd / 2, stationGroup);
+			const openW = Math.min(bw * 0.5, 7), ww = (bw - openW) / 2;
+			for (const s of [-1, 1]) {
+				box(ww, wh, 0.3, MAT.wallWood, bcx + s * (openW + ww) / 2, uy, bcz - bd / 2, stationGroup);
+			}
+			const pitch = 0.36, hw2 = (bw + 2.6) / 2;
+			const peak = Math.tan(pitch) * (bw / 2), ridge = uy + wh + Math.tan(pitch) * hw2;
+			const tri = new THREE.Shape();
+			tri.moveTo(-bw / 2, 0); tri.lineTo(bw / 2, 0); tri.lineTo(0, peak); tri.closePath();
+			for (const z of [bcz - bd / 2, bcz + bd / 2]) {
+				const g = new THREE.Mesh(new THREE.ShapeGeometry(tri), MAT.wallWood);
+				g.position.set(bcx, uy + wh, z);
+				g.castShadow = g.receiveShadow = true;
+				stationGroup.add(g);
+			}
+			const slab = hw2 / Math.cos(pitch);
+			for (const s of [-1, 1]) {
+				const rf = new THREE.Mesh(new THREE.BoxGeometry(slab, 0.26, bd + 2.6), MAT.roofTile);
+				rf.position.set(bcx + s * (hw2 / 2), uy + wh + Math.tan(pitch) * hw2 / 2, bcz);
+				rf.rotation.z = -s * pitch;
+				rf.castShadow = rf.receiveShadow = true;
+				stationGroup.add(rf);
+			}
+			box(0.5, 0.3, bd + 2.8, MAT.beam, bcx, ridge - 0.1, bcz, stationGroup, true);
+			for (const s of [-1, 1]) {
+				box(0.28, 0.34, bd + 2.6, MAT.beam, bcx + s * hw2, uy + wh - 0.1, bcz, stationGroup, true);
+			}
+		}
+		G.plazaCx = bcx; G.plazaCz = bcz + bd / 2 + 22;
+		G.plazaX = wx(fx1) + 10;
 	}
-	const floor = new THREE.Mesh(new THREE.PlaneGeometry(cw, G.concD), MAT.conc);
-	floor.rotation.x = -Math.PI / 2;
-	floor.position.set(G.concCx, EY + 0.02, czc);
-	floor.receiveShadow = true;
-	stationGroup.add(floor);
 
-	if (hasLink()) {
-		// 橋上/地下のコンコースは腰壁+ガラス。俯瞰で中が見えるよう天井は張らない
+	/* ---- 構内踏切 ---- */
+	const crossRects = greedyRects(0, isCross);
+	for (const r of crossRects) {
+		const b = rectBox(r);
+		box(b.w, 0.16, b.d, MAT.stair, b.cx, 0.06, b.cz, stationGroup, true);
+		// 遮断機。開閉でZ軸まわりに回す
 		for (const s of [-1, 1]) {
-			const wx = G.concCx + s * cw / 2;
-			box(0.35, 1.0, G.concD, MAT.concUnder, wx, EY, czc, stationGroup);
-			box(0.3, wallH - 1.0, G.concD, MAT.glass, wx, EY + 1.0, czc, stationGroup, true);
-		}
-		for (const z of [G.concZ0, G.concZ1]) {
-			box(cw, 1.0, 0.35, MAT.concUnder, G.concCx, EY, z, stationGroup);
-			box(cw, wallH - 1.0, 0.3, MAT.glass, G.concCx, EY + 1.0, z, stationGroup, true);
-		}
-		// 屋根の縁(庇)だけ回して建物の輪郭を出す
-		box(cw + 1.4, 0.3, 0.9, MAT.roof, G.concCx, EY + wallH, G.concZ0 - 0.4, stationGroup, true);
-		box(cw + 1.4, 0.3, 0.9, MAT.roof, G.concCx, EY + wallH, G.concZ1 + 0.4, stationGroup, true);
-	} else {
-		/* ---- 地平の小駅は木造駅舎。下見板張りの壁に切妻の瓦屋根 ---- */
-		const wh = 3.2;
-		// ホーム側(concZ0)は出入口なので開けておく
-		for (const s of [-1, 1]) {
-			box(0.3, wh, G.concD, MAT.wallWood, G.concCx + s * cw / 2, EY, czc, stationGroup);
-		}
-		box(cw, wh, 0.3, MAT.wallWood, G.concCx, EY, G.concZ1, stationGroup);
-		// 出入口側は左右に袖壁だけ残す
-		const openW = Math.min(cw * 0.5, 7);
-		for (const s of [-1, 1]) {
-			const ww = (cw - openW) / 2;
-			box(ww, wh, 0.3, MAT.wallWood, G.concCx + s * (openW + ww) / 2, EY, G.concZ0, stationGroup);
-		}
-		// 妻壁(切妻の三角部分)
-		const pitch = 0.36;                      // 屋根の勾配(rad)
-		const hw2 = (cw + 2.6) / 2;
-		const peak = Math.tan(pitch) * (cw / 2);
-		const ridge = EY + wh + Math.tan(pitch) * hw2;
-		const tri = new THREE.Shape();
-		tri.moveTo(-cw / 2, 0); tri.lineTo(cw / 2, 0); tri.lineTo(0, peak); tri.closePath();
-		for (const z of [G.concZ0, G.concZ1]) {
-			const g = new THREE.Mesh(new THREE.ShapeGeometry(tri), MAT.wallWood);
-			g.position.set(G.concCx, EY + wh, z);
-			g.castShadow = g.receiveShadow = true;
-			stationGroup.add(g);
-		}
-		// 切妻屋根。棟は線路と平行(Z方向)に通す
-		const slabLen = hw2 / Math.cos(pitch);
-		for (const s of [-1, 1]) {
-			const rf = new THREE.Mesh(
-				new THREE.BoxGeometry(slabLen, 0.26, G.concD + 2.6), MAT.roofTile);
-			rf.position.set(
-				G.concCx + s * (hw2 / 2),
-				EY + wh + Math.tan(pitch) * hw2 / 2,
-				czc);
-			rf.rotation.z = -s * pitch;
-			rf.castShadow = rf.receiveShadow = true;
-			stationGroup.add(rf);
-		}
-		// 棟と軒桁
-		box(0.5, 0.3, G.concD + 2.8, MAT.beam, G.concCx, ridge - 0.1, czc, stationGroup, true);
-		for (const s of [-1, 1]) {
-			box(0.28, 0.34, G.concD + 2.6, MAT.beam, G.concCx + s * hw2, EY + wh - 0.1, czc, stationGroup, true);
-		}
-		// 駅舎からホーム端まで渡る構内踏切
-		const xa = platX(0) - S.platW / 2;
-		box(G.concX0 + 3 - xa, 0.16, 4.0, MAT.stair,
-			(xa + G.concX0 + 3) / 2, 0.06, G.crossZ, stationGroup, true);
-		// 踏切からホームへ上がるスロープ
-		const rampLen = G.crossZ - (G.platZ1 - 3);
-		for (let i = 0; i < 6; i++) {
-			const f = (i + 0.5) / 6;
-			box(S.platW * 0.75, 0.22, rampLen / 6 + 0.1, MAT.stair,
-				platX(0), CFG.PLAT_Y * f - 0.11, G.crossZ - rampLen * f, stationGroup, true);
-		}
-		// 踏切の警報機と遮断機。遮断桿は開閉でZ軸まわりに回す
-		G.gateArms = [];
-		for (const s of [-1, 1]) {
-			const bx = s < 0 ? xa - 1.6 : G.concX0 + 1.6;
-			box(0.3, 2.8, 0.3, MAT.gate, bx, 0, G.crossZ + 3.0, stationGroup, true);
+			const bx = s < 0 ? b.cx - b.w / 2 - 1.2 : b.cx + b.w / 2 + 1.2;
+			box(0.3, 2.8, 0.3, MAT.gate, bx, 0, b.cz + b.d / 2 + 1.2, stationGroup, true);
 			const arm = new THREE.Mesh(new THREE.BoxGeometry(6.5, 0.22, 0.22), MAT.vend);
-			arm.position.set(bx - s * 3.25, 2.2, G.crossZ + 3.0);
+			arm.position.set(bx - s * 3.25, 2.2, b.cz + b.d / 2 + 1.2);
 			arm.castShadow = true;
 			stationGroup.add(arm);
-			G.gateArms.push({ mesh: arm, px: bx, s: s, z: G.crossZ + 3.0 });
+			G.gateArms.push({ mesh: arm, px: bx, s: s, z: b.cz + b.d / 2 + 1.2 });
 		}
-	}
-	// 天井の照明(木造駅舎は屋根で隠れるので置かない)
-	if (hasLink()) {
-		const clampGeo = new THREE.BoxGeometry(3.0, 0.14, 0.3);
-		const clamps = [];
-		for (let x = G.concX0 + 6; x < G.concX1 - 3; x += 9) {
-			for (let z = G.concZ0 + 6; z < G.concZ1 - 3; z += 12) clamps.push([x, EY + wallH - 0.4, z]);
-		}
-		addInstanced(clampGeo, MAT.lamp, clamps, stationGroup, false);
-	} else {
-		// 軒下の裸電球
-		box(0.5, 0.3, 0.5, MAT.lamp, G.concCx, EY + 2.9, G.concZ0 - 0.8, stationGroup, false);
 	}
 
-	/* ---- 改札 ---- */
-	const gBodyGeo = new THREE.BoxGeometry(0.5, 1.0, 3.0);
-	const gTopGeo = new THREE.BoxGeometry(0.56, 0.1, 3.0);
-	const gFlapGeo = new THREE.BoxGeometry(0.08, 0.72, 0.9);
-	const mDeskGeo = new THREE.BoxGeometry(0.7, 1.05, 3.0);       // 手動改札のラッチ台
-	const mPostGeo = new THREE.BoxGeometry(0.24, 2.3, 0.24);
-	const gb = [], gt = [], gf = [], md = [], mp = [], staff = [];
-	for (let j = 0; j < gateCount(); j++) {
-		const g = gatePos(j);
-		if (gateIsManual(j)) {
-			// 通路の両脇にラッチ台。片側に駅員が立つ
+	/* ---- 設備 ---- */
+	const gb = [], gt = [], gf = [], md = [], mp = [], staff = [], vends = [], benches = [];
+	const stepPlates = [];
+	for (const o of B.objs.values()) {
+		const oy = layerY(o.l);
+		const b = rectBox({ x0: o.x, x1: o.x + o.w - 1, z0: o.z, z1: o.z + o.d - 1 });
+		if (o.k === 'gateA') {
 			for (const s of [-1, 1]) {
-				md.push([g.x + s * 0.95, EY, g.z]);
-				mp.push([g.x + s * 0.95, EY, g.z - 1.6]);
+				gb.push([b.cx + s * 0.85, oy + 0.5, b.cz]);
+				gt.push([b.cx + s * 0.85, oy + 1.05, b.cz]);
+				gf.push([b.cx + s * 0.55, oy + 0.36, b.cz + 1.2]);
 			}
-			staff.push([g.x + 1.55, EY, g.z - 0.4, 0, Math.PI, 0]);
-		} else {
+		} else if (o.k === 'gateM') {
 			for (const s of [-1, 1]) {
-				gb.push([g.x + s * 0.85, EY + 0.5, g.z]);
-				gt.push([g.x + s * 0.85, EY + 1.05, g.z]);
-				gf.push([g.x + s * 0.55, EY + 0.36, g.z + 1.2]);
+				md.push([b.cx + s * 0.95, oy, b.cz]);
+				mp.push([b.cx + s * 0.95, oy, b.cz - 1.6]);
+			}
+			staff.push([b.cx + 1.55, oy, b.cz - 0.4, 0, Math.PI, 0]);
+		} else if (o.k === 'vend') {
+			vends.push([b.cx, oy + 0.95, b.cz]);
+		} else if (o.k === 'conv' || o.k === 'kiosk') {
+			box(b.w - 0.4, 2.9, b.d - 0.4, MAT.shop, b.cx, oy + 0.02, b.cz, stationGroup);
+			box(b.w, 0.5, 0.3, MAT.lamp, b.cx, oy + 2.5, b.cz - b.d / 2 + 0.2, stationGroup, false);
+		} else if (o.k === 'stair' || o.k === 'escal') {
+			// 階段は地上⇄駅舎レイヤーを結ぶ。橋上なら上り、地下なら下り
+			const rise = layerY(LU) - CFG.PLAT_Y;
+			const run = b.d;
+			const ang = -Math.atan2(rise, run);
+			if (o.k === 'escal') {
+				const len = Math.hypot(rise, run);
+				const body = new THREE.Mesh(new THREE.BoxGeometry(b.w - 0.4, 0.75, len), MAT.esc);
+				body.position.set(b.cx, CFG.PLAT_Y + rise / 2, b.cz);
+				body.rotation.x = ang;
+				body.castShadow = body.receiveShadow = true;
+				stationGroup.add(body);
+			} else {
+				const steps = 12;
+				for (let s = 0; s < steps; s++) {
+					const f = (s + 0.5) / steps;
+					stepPlates.push([b.cx, CFG.PLAT_Y + rise * f - 0.11, b.cz + b.d / 2 - run * f]);
+				}
+			}
+			for (const s of [-1, 1]) {
+				const len = Math.hypot(rise, run);
+				const hr = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.85, len), MAT.handrail);
+				hr.position.set(b.cx + s * (b.w / 2 - 0.2), CFG.PLAT_Y + rise / 2 + 0.55, b.cz);
+				hr.rotation.x = ang;
+				hr.castShadow = true;
+				stationGroup.add(hr);
 			}
 		}
 	}
-	addInstanced(gBodyGeo, MAT.gate, gb, stationGroup, true);
-	addInstanced(gTopGeo, MAT.lamp, gt, stationGroup, false);
-	addInstanced(gFlapGeo, MAT.gateFlap, gf, stationGroup, false);
-	addInstanced(mDeskGeo, MAT.desk, md, stationGroup, true);
-	addInstanced(mPostGeo, MAT.handrail, mp, stationGroup, true);
+	addInstanced(new THREE.BoxGeometry(0.5, 1.0, 3.0), MAT.gate, gb, stationGroup, true);
+	addInstanced(new THREE.BoxGeometry(0.56, 0.1, 3.0), MAT.lamp, gt, stationGroup, false);
+	addInstanced(new THREE.BoxGeometry(0.08, 0.72, 0.9), MAT.gateFlap, gf, stationGroup, false);
+	addInstanced(new THREE.BoxGeometry(0.7, 1.05, 3.0), MAT.desk, md, stationGroup, true);
+	addInstanced(new THREE.BoxGeometry(0.24, 2.3, 0.24), MAT.handrail, mp, stationGroup, true);
 	if (humanGeo) addInstanced(humanGeo, MAT.staff, staff, stationGroup, true);
+	addInstanced(new THREE.BoxGeometry(1.1, 1.9, 0.7), MAT.vend, vends, stationGroup, true);
+	addInstanced(new THREE.BoxGeometry(1.6, 0.45, 0.5), MAT.bench, benches, stationGroup, true);
+	addInstanced(new THREE.BoxGeometry(GRID.CELL * 1.6, 0.22, 1.0), MAT.stair, stepPlates, stationGroup, true);
 
-	// 改札の上の案内サイン(吊り下げ)。改札が無いうちは出さない
-	if (gateCount() > 0) {
-		const sgW = Math.min(cw - 6, 3 + gateCount() * 1.0);
-		box(sgW, 0.55, 0.12, MAT.sign, G.concCx, EY + 2.55, G.gateZ + 2.4, stationGroup, true);
-		box(sgW * 0.9, 0.34, 0.14, MAT.signFace, G.concCx, EY + 2.65, G.gateZ + 2.33, stationGroup, true);
-	}
-
-	/* ---- 駅ナカ店舗 / 券売機 ---- */
-	for (let s = 0; s < S.shops; s++) {
-		const side = s % 2 ? 1 : -1;
-		const idx = Math.floor(s / 2);
-		const sx = G.concCx + side * (cw / 2 - 5.5 - idx * 9);
-		// 駅舎の中に収める(小さい地平駅でもはみ出さないように)
-		const sz = Math.min(G.concZ1 - 4, Math.max(G.concZ0 + 4,
-			G.gateZ + (hasLink() ? -18 : 11) - (idx % 2) * 9));
-		box(7, 2.9, 6, MAT.shop, sx, EY + 0.02, sz, stationGroup);
-		box(7.2, 0.5, 0.3, MAT.lamp, sx, EY + 2.5, sz - 3.1, stationGroup, false);
-	}
-	const vendGeo = new THREE.BoxGeometry(1.1, 1.9, 0.7);
-	const vends = [];
-	for (let i = 0; i < Math.min(6, 1 + gateCount() / 8); i++) {
-		vends.push([G.concX0 + 3, EY + 0.95,
-			Math.min(G.concZ1 - 3, G.gateZ + 6 + i * 2.2)]);
-	}
-	addInstanced(vendGeo, MAT.vend, vends, stationGroup, true);
-
-	/* ---- 出口 ----
-	   地平駅は駅舎の外がそのまま駅前。橋上駅舎は線路の真上に降りられないので、
-	   デッキを線路脇まで横に渡してから地上に降ろす */
-	if (!hasLink()) {
-		G.plazaX = G.concX1 + 10;
-		G.plazaCx = G.concCx;
-		G.plazaCz = G.exitZ + 22;
-		fitShadow();
-		buildCity();
-		return;
-	}
-
-	if (isUnder()) {
-		// 地下は線路の脇まで掘り進めて、そこから地上へ上がる
-		G.plazaX = G.concX1 + 26;
-		G.plazaCx = G.plazaX + 20;
-		G.plazaCz = G.exitZ;
-		const runLen = G.plazaX - G.concX1 + 6;
-		box(runLen, 0.6, 14, MAT.concUnder, G.concX1 + runLen / 2 - 3, EY - 0.6, G.exitZ, stationGroup);
-		const cor = new THREE.Mesh(new THREE.PlaneGeometry(runLen, 14), MAT.conc);
-		cor.rotation.x = -Math.PI / 2;
-		cor.position.set(G.concX1 + runLen / 2 - 3, EY + 0.02, G.exitZ);
-		cor.receiveShadow = true;
-		stationGroup.add(cor);
-		// 地上へ上がる階段
-		const us = 16;
-		for (let i = 0; i < us; i++) {
-			const f = (i + 0.5) / us;
-			box(14 / us + 0.1, 0.3, 8, MAT.stair,
-				G.plazaX - 4 + 14 * f, EY + (0 - EY) * f, G.exitZ, stationGroup, true);
+	/* ---- 架線柱 ---- */
+	if (DV.all.length) {
+		const poles = [];
+		let rx0 = 1e9, rx1 = -1e9;
+		for (const r of DV.all) { rx0 = Math.min(rx0, r.x); rx1 = Math.max(rx1, r.x + 1); }
+		for (let z = 6; z < GRID.D - 6; z += 22) {
+			if (floorRects.length && z > fz0 - 3 && z < fz1 + 3 && hasLink()) continue;
+			poles.push([wx(rx0) - 3, 4.75, wz(z)]);
+			poles.push([wx(rx1) + 3, 4.75, wz(z)]);
 		}
-		G.holeX = [G.concX0 - 1, G.plazaX + 12];
-		G.holeZ = [G.concZ0 - 1, G.concZ1 + 1];
-		// 掘り込みの擁壁。線路の下は通すので、線路にかかる部分は空ける
-		const wallY = -0.45 - EY;
-		for (const hz of G.holeZ) {
-			box(G.holeX[1] - G.holeX[0] + 1.2, wallY, 0.6, MAT.concUnder,
-				(G.holeX[0] + G.holeX[1]) / 2, EY, hz, stationGroup);
-		}
-		for (const hx of G.holeX) {
-			box(0.6, wallY, G.holeZ[1] - G.holeZ[0], MAT.concUnder,
-				hx, EY, (G.holeZ[0] + G.holeZ[1]) / 2, stationGroup);
-		}
-		fitShadow();
-		buildCity();
-		return;
+		addInstanced(new THREE.BoxGeometry(0.36, 9.5, 0.36), MAT.catenary, poles, stationGroup, true);
 	}
-
-	const dw = Math.min(cw, 60);
-	const deckZ = G.exitZ + 7;
-	box(dw, 0.6, 20, MAT.concUnder, G.concCx, CFG.CONC_Y - 0.6, deckZ, stationGroup);
-	const deck = new THREE.Mesh(new THREE.PlaneGeometry(dw, 20), MAT.conc);
-	deck.rotation.x = -Math.PI / 2;
-	deck.position.set(G.concCx, CFG.CONC_Y + 0.01, deckZ);
-	deck.receiveShadow = true;
-	stationGroup.add(deck);
-
-	// 線路をまたいで東側へ伸ばす連絡デッキ
-	G.plazaX = trackX(S.nTrack - 1) + 46;
-	const bridgeLen = G.plazaX - G.concCx;
-	box(bridgeLen, 0.6, 12, MAT.concUnder, G.concCx + bridgeLen / 2, CFG.CONC_Y - 0.6, deckZ, stationGroup);
-	const bridge = new THREE.Mesh(new THREE.PlaneGeometry(bridgeLen, 12), MAT.conc);
-	bridge.rotation.x = -Math.PI / 2;
-	bridge.position.set(G.concCx + bridgeLen / 2, CFG.CONC_Y + 0.01, deckZ);
-	bridge.receiveShadow = true;
-	stationGroup.add(bridge);
-	for (const s of [-1, 1]) {
-		box(bridgeLen, 1.1, 0.2, MAT.handrail, G.concCx + bridgeLen / 2, CFG.CONC_Y, deckZ + s * 6, stationGroup, true);
-	}
-	// 橋脚(線路の間を避けて立てる)
-	for (let bx = G.concX1 + 6; bx < G.plazaX; bx += 16) {
-		let onTrack = false;
-		for (let t = 0; t < S.nTrack; t++) if (Math.abs(bx - trackX(t)) < CFG.TRACK_W) onTrack = true;
-		if (onTrack) continue;
-		box(1.2, CFG.CONC_Y - 0.6, 1.2, MAT.pillar, bx, 0, deckZ, stationGroup, true);
-	}
-	// コンコース自体の橋脚
-	for (let bx = G.concX0 + 4; bx < G.concX1 - 2; bx += 14) {
-		let onTrack = false;
-		for (let t = 0; t < S.nTrack; t++) if (Math.abs(bx - trackX(t)) < CFG.TRACK_W) onTrack = true;
-		if (onTrack) continue;
-		box(1.2, CFG.CONC_Y - 0.6, 1.2, MAT.pillar, bx, 0, G.concZ1 - 2, stationGroup, true);
-	}
-
-	// 地上へ下りる階段(線路の外側)
-	const dsteps = 18;
-	for (let i = 0; i < dsteps; i++) {
-		const f = (i + 0.5) / dsteps;
-		box(16 / dsteps + 0.1, 0.3, 10, MAT.stair,
-			G.plazaX + 16 * f, CFG.CONC_Y - CFG.CONC_Y * f, deckZ, stationGroup, true);
-	}
-	G.plazaCz = G.exitZ;
 
 	fitShadow();
 	buildCity();
 }
-
 /* ================= 駅の外(街) =================
    増築のたびに作り直されるので、並びが変わらないよう乱数はシード固定 */
 let _seed = 1;
