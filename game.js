@@ -100,6 +100,278 @@ function typeFits(mid, ty) { return modelOf(mid).fit.indexOf(ty) >= 0; }
 function contractPrice(mid, cars) { return modelOf(mid).price * cars; }
 function contractLease(mid, cars) { return modelOf(mid).lease * cars; }
 
+/* ================= 盤面(グリッド) =================
+   1マス2m。1両=10マス、15両=150マス、線路1本=2マス幅(4m)。
+   索引はZ最速。線路もホームもZに長いので、保存時のRLEのラン数が桁で減る。
+   レイヤーは 0=地上 / 1=上階または地下(S.linkで決まる)の2枚。
+   セル種別は追記のみ。欠番の再利用は禁止(既存セーブが静かに壊れるため) */
+const GRID = { CELL: 2, W: 176, D: 224, L: 2, OX: 88, OZ: 112 };
+
+const C_EMPTY = 0, C_RAIL_L = 1, C_RAIL_R = 2, C_PLAT = 3, C_FLOOR = 4,
+	C_WALL = 5, C_STAIR = 6, C_ESCAL = 7, C_GATE = 8, C_UNUSED9 = 9,
+	C_SHOP = 10, C_VEND = 11, C_BENCH = 12, C_PILLAR = 13, C_ENTRANCE = 14,
+	C_OOB = 255;
+
+// 属性ビット。踏切は「線路の上に重なる」ので種別ではなくビットで持つ。
+// 種別にすると線路の連なりが分断され、番線として検出されなくなる
+const F_ROOF = 1, F_CROSS = 2;
+
+// 歩ける種別か
+const WALKABLE = {};
+for (const t of [C_PLAT, C_FLOOR, C_STAIR, C_ESCAL, C_GATE, C_ENTRANCE, C_SHOP, C_VEND, C_BENCH]) WALKABLE[t] = 1;
+
+// 踏切が敷かれた線路セルも歩ける(列車接近時は R.crossOpenAt で閉じる)
+function walkableAt(l, x, z) {
+	const t = tAt(l, x, z);
+	if (WALKABLE[t]) return true;
+	if ((t === C_RAIL_L || t === C_RAIL_R) && (B.f[gidx(l, x, z)] & F_CROSS)) return true;
+	return false;
+}
+
+const B = {
+	t: null,   // 種別
+	f: null,   // 属性ビット(bit0=上家)
+	o: null,   // 設備インスタンスID(0=なし)
+	objs: null,
+	nextId: 1,
+};
+
+function gidx(l, x, z) { return (l * GRID.W + x) * GRID.D + z; }
+function inBoard(x, z) { return x >= 0 && x < GRID.W && z >= 0 && z < GRID.D; }
+function tAt(l, x, z) { return inBoard(x, z) ? B.t[gidx(l, x, z)] : C_OOB; }
+function setT(l, x, z, v) { if (inBoard(x, z)) B.t[gidx(l, x, z)] = v; }
+
+// 盤 ↔ ワールド座標
+function wx(gx) { return (gx - GRID.OX + 0.5) * GRID.CELL; }
+function wz(gz) { return (gz - GRID.OZ + 0.5) * GRID.CELL; }
+function cx(X) { return Math.floor(X / GRID.CELL) + GRID.OX; }
+function cz(Z) { return Math.floor(Z / GRID.CELL) + GRID.OZ; }
+
+function boardAlloc() {
+	const n = GRID.W * GRID.D * GRID.L;
+	B.t = new Uint8Array(n);
+	B.f = new Uint8Array(n);
+	B.o = new Uint16Array(n);
+	B.objs = new Map();
+	B.nextId = 1;
+}
+
+function fillRect(l, x0, x1, z0, z1, type) {
+	for (let x = Math.max(0, x0); x <= Math.min(GRID.W - 1, x1); x++) {
+		for (let z = Math.max(0, z0); z <= Math.min(GRID.D - 1, z1); z++) {
+			B.t[gidx(l, x, z)] = type;
+		}
+	}
+}
+
+// 設備を置く。占有セルに種別とIDを書く
+function placeFac(kind, l, x, z, w, d, cell) {
+	const id = B.nextId++;
+	B.objs.set(id, { i: id, k: kind, l: l, x: x, z: z, w: w, d: d });
+	for (let i = 0; i < w; i++) {
+		for (let j = 0; j < d; j++) {
+			if (!inBoard(x + i, z + j)) continue;
+			const k = gidx(l, x + i, z + j);
+			B.t[k] = cell;
+			B.o[k] = id;
+		}
+	}
+	return id;
+}
+
+/* ---- いまのパラメトリックな駅から盤面を起こす ----
+   ワールド座標から変換すると量子化で線路とホームの間に隙間が出るので、
+   盤面の上で直接レイアウトする。これで隣接が構造的に保証される */
+const CAR_CELLS = CFG.CAR_LEN / GRID.CELL;   // 1両 = 10マス
+
+function gridFromParams() {
+	boardAlloc();
+	recalcGeometry();
+	const LU = hasLink() ? 1 : 0;                              // 駅舎のレイヤー
+	const pw = Math.max(3, Math.round(S.platW / GRID.CELL));   // ホーム幅(マス)
+	const unit = pw + 4;                                       // ホーム + 両側の線路
+	const startX = GRID.OX - Math.floor(S.nPlat * unit / 2);
+	const plen = S.cars * CAR_CELLS;                           // ホーム長(マス)
+	const pz0 = GRID.OZ - Math.floor(plen / 2), pz1 = pz0 + plen - 1;
+
+	G.gx = [];   // 番線 → 左レールのx
+	for (let i = 0; i < S.nPlat; i++) {
+		const x0 = startX + i * unit + 2;                      // ホームの左端
+		fillRect(0, x0, x0 + pw - 1, pz0, pz1, C_PLAT);
+		for (let x = x0; x < x0 + pw; x++) {
+			for (let z = pz0; z <= pz1; z++) B.f[gidx(0, x, z)] |= F_ROOF;
+		}
+		// ホームの両脇に線路。盤の端から端まで通す(外へ繋がっている扱い)
+		for (const side of [0, 1]) {
+			const t = i * 2 + side;
+			if (t >= S.nTrack) continue;
+			const rx = side ? x0 + pw : x0 - 2;
+			fillRect(0, rx, rx, 0, GRID.D - 1, C_RAIL_L);
+			fillRect(0, rx + 1, rx + 1, 0, GRID.D - 1, C_RAIL_R);
+			G.gx[t] = rx;
+		}
+	}
+
+	// 駅舎。橋上/地下はホーム北端にまたがり、地平は線路の外側に建つ
+	const allX0 = startX, allX1 = startX + S.nPlat * unit - 1;
+	let fx0, fx1, fz0, fz1;
+	if (hasLink()) {
+		fx0 = allX0 - 1; fx1 = allX1 + 1;
+		fz0 = pz1 - Math.max(4, Math.round(G.over / GRID.CELL));
+		fz1 = fz0 + Math.max(8, Math.round(G.concD / GRID.CELL));
+	} else {
+		fx0 = allX1 + 2;
+		fx1 = fx0 + Math.max(6, Math.ceil(gateCount() * 1.2) + 4);
+		fz0 = pz1 + 2;
+		fz1 = fz0 + Math.max(7, Math.ceil(gateCount() * 0.6) + 6);
+	}
+	fx1 = Math.min(GRID.W - 2, fx1); fz1 = Math.min(GRID.D - 3, fz1);
+	fillRect(LU, fx0, fx1, fz0, fz1, C_FLOOR);
+	fillRect(LU, fx0 + 1, fx1 - 1, fz1, fz1 + 1, C_ENTRANCE);
+
+	if (hasStairs()) {
+		// 階段(2×5マス = 4×10m)。駅舎に覆われた範囲に等間隔で置く
+		const sa = Math.max(pz0 + 1, fz0 + 1), sb = Math.min(pz1 - 5, fz1 - 5);
+		for (let i = 0; i < S.nPlat; i++) {
+			const px = startX + i * unit + 2 + Math.max(0, Math.floor(pw / 2) - 1);
+			for (let k = 0; k < S.stairs; k++) {
+				const sz = (S.stairs === 1 || sb <= sa) ? Math.round((sa + sb) / 2)
+					: Math.round(sa + k * (sb - sa) / (S.stairs - 1));
+				if (sz < 0 || sz + 4 >= GRID.D) continue;
+				placeFac(S.esc ? 'escal' : 'stair', 0, px, sz, 2, 5, S.esc ? C_ESCAL : C_STAIR);
+			}
+		}
+	} else {
+		// 地平駅は構内踏切。線路を上書きせず属性ビットで重ねる
+		const crz = pz1 + 2;
+		for (let x = startX + 2; x <= fx0; x++) {
+			for (let z = crz; z <= crz + 1; z++) {
+				if (!inBoard(x, z)) continue;
+				const k = gidx(0, x, z);
+				B.f[k] |= F_CROSS;
+				if (B.t[k] === C_EMPTY) B.t[k] = C_FLOOR;
+			}
+		}
+	}
+
+	// 改札(1×1)。駅舎の中に横一列、はみ出したら手前へ折り返す
+	const total = gateCount();
+	const cols = Math.max(1, fx1 - fx0 - 1);
+	const gz = hasLink() ? fz1 - 3 : fz0 + 3;
+	for (let j = 0; j < total; j++) {
+		const row = Math.floor(j / cols), col = j % cols;
+		const gzz = gz - row * 2;
+		if (gzz > fz0) placeFac(gateIsManual(j) ? 'gateM' : 'gateA', LU, fx0 + 1 + col, gzz, 1, 1, C_GATE);
+	}
+
+	// 駅ナカコンビニ(3×4 = 6×8m = 48m²。NewDaysの平均と一致)と自販機
+	for (let s = 0; s < S.shops; s++) {
+		const side = s % 2, idx = Math.floor(s / 2);
+		const sx = side ? fx1 - 3 - idx * 4 : fx0 + 1 + idx * 4;
+		const sz = Math.max(fz0 + 1, gz - 6);
+		if (sx > fx0 && sx + 2 < fx1 && sz + 3 <= fz1) placeFac('conv', LU, sx, sz, 3, 4, C_SHOP);
+	}
+	for (let i = 0; i < Math.min(6, 1 + total / 8); i++) {
+		const vz = Math.min(fz1 - 1, gz + 2 + i);
+		if (vz > fz0 && vz < fz1) placeFac('vend', LU, fx0 + 1, vz, 1, 1, C_VEND);
+	}
+
+	rebuildDerived();
+}
+
+/* ---- 盤面から派生値を作る。recalcGeometry() のグリッド版 ----
+   番線は「RAIL_L/RAIL_R のペアがZ方向に連なる区間」として検出する。
+   永続ID(tid)はセーブが持ち、実行時は表示順の密インデックス(ti)で引く */
+const DV = { tracks: [], byTid: null, plats: [], ver: 0 };
+
+function rebuildDerived() {
+	const tracks = [];
+	for (let x = 0; x < GRID.W - 1; x++) {
+		let z = 0;
+		while (z < GRID.D) {
+			if (tAt(0, x, z) === C_RAIL_L && tAt(0, x + 1, z) === C_RAIL_R) {
+				const z0 = z;
+				while (z < GRID.D && tAt(0, x, z) === C_RAIL_L && tAt(0, x + 1, z) === C_RAIL_R) z++;
+				// 両端が盤の端に届いていれば「外へ繋がっている」= 営業できる番線
+				const through = (z0 === 0 && z === GRID.D);
+				tracks.push({ x: x, z0: z0, z1: z - 1, ok: through });
+			} else z++;
+		}
+	}
+	tracks.sort((a, b) => a.x - b.x);
+
+	// 永続ID。種セル S.tseed を頼りに、線路を敷き替えても番号が動かないようにする
+	if (!Array.isArray(S.tseed)) S.tseed = [];
+	const used = {};
+	for (const r of tracks) {
+		let tid = null;
+		for (const sd of S.tseed) {
+			if (sd.x === r.x && sd.z >= r.z0 && sd.z <= r.z1 && !used[sd.tid]) { tid = sd.tid; break; }
+		}
+		if (tid === null) {
+			tid = S.nextTid || 1;
+			S.nextTid = tid + 1;
+			S.tseed.push({ tid: tid, x: r.x, z: Math.round((r.z0 + r.z1) / 2) });
+		}
+		used[tid] = 1;
+		r.tid = tid;
+	}
+	const live = tracks.filter(r => r.ok);
+	live.forEach((r, i) => { r.ti = i; r.num = i + 1; });
+
+	// ホームに面しているか、有効長は何両か
+	for (const r of live) {
+		let best = 0, run = 0, bz1 = -1;
+		for (let z = r.z0; z <= r.z1; z++) {
+			const near = tAt(0, r.x - 1, z) === C_PLAT || tAt(0, r.x + 2, z) === C_PLAT;
+			if (near) { run++; if (run > best) { best = run; bz1 = z; } } else run = 0;
+		}
+		r.adjLen = best;
+		r.cars = Math.min(CFG.CARS_MAX, Math.floor(best / (CFG.CAR_LEN / GRID.CELL)));
+		r.adjZ1 = bz1;
+	}
+
+	DV.tracks = live;
+	DV.byTid = new Map(live.map(r => [r.tid, r]));
+	DV.all = tracks;
+	DV.ver++;
+	return DV;
+}
+
+// 永続ID → 実行時の密インデックス
+function tiOf(tid) {
+	const r = DV.byTid && DV.byTid.get(tid);
+	return r ? r.ti : -1;
+}
+
+/* 盤面が期待どおりに起きているかを数える(Stage1の検証用)。
+   パラメトリックな値と突き合わせて、ズレていれば移行処理のバグ */
+function gridStats() {
+	const cnt = {};
+	let occupied = 0;
+	for (let i = 0; i < B.t.length; i++) {
+		const v = B.t[i];
+		if (v) { occupied++; cnt[v] = (cnt[v] || 0) + 1; }
+	}
+	const name = { 1: 'RAIL_L', 2: 'RAIL_R', 3: 'PLAT', 4: 'FLOOR', 6: 'STAIR', 7: 'ESCAL', 8: 'GATE', 10: 'SHOP', 11: 'VEND', 14: 'ENTRANCE' };
+	const cells = {};
+	for (const k in cnt) cells[name[k] || k] = cnt[k];
+	let cross = 0, roof = 0;
+	for (let i = 0; i < B.f.length; i++) { if (B.f[i] & F_CROSS) cross++; if (B.f[i] & F_ROOF) roof++; }
+	cells['(踏切)'] = cross; cells['(上家)'] = roof;
+	const perCar = CFG.CAR_LEN / GRID.CELL;
+	return {
+		cells: cells, occupied: occupied,
+		tracks: DV.tracks.length, tracksAll: DV.all.length,
+		expectTracks: S.nTrack,
+		cars: DV.tracks.map(r => r.cars), expectCars: S.cars,
+		adjLen: DV.tracks.map(r => r.adjLen), expectAdj: S.cars * perCar,
+		tids: DV.tracks.map(r => r.tid),
+		facs: B.objs.size,
+		expectFacs: (hasStairs() ? S.stairs * S.nPlat : 0) + gateCount() + S.shops + Math.min(6, Math.floor(1 + gateCount() / 8)),
+	};
+}
+
 /* ================= 駅周辺の開発 =================
    乗客は「駅の周りに何があるか」で決まる。用途ごとに時間帯の形が違い、
    乗車(駅から出る)と降車(駅に着く)を別々に持つので朝夕の向きが再現される。
@@ -190,6 +462,8 @@ function defaultState() {
 		nTrack: 1,            // 線路本数(番線)
 		lines: 1,             // 本線の数(駅の外へ出ていく線路)
 		trackLine: [0],       // 番線 → どの本線に属するか
+		tseed: [],            // 番線の永続ID。線路を敷き替えても番号が動かないための種セル
+		nextTid: 1,
 		platW: 6,             // ホーム幅
 		stairs: 0,            // 各ホームの階段数(地平駅では0)
 		esc: false,           // エスカレーター化
@@ -2591,6 +2865,8 @@ function resetRuntimeForLayout() {
 	R.trains.length = 0;
 	R.missAcc = new Array(Math.max(1, S.nTrack) * 2).fill(0);
 	recountWaiting();
+	// 盤面をパラメータから起こし直す(Stage1: 検証用に並走させている)
+	try { gridFromParams(); } catch (e) { console.error('grid', e); }
 	compileSched();
 }
 
@@ -3317,6 +3593,10 @@ function boot() {
 		dia: () => ({ fleet: S.fleet, dia: S.dia, slots: R.sched.length, need: R.need, have: R.have, short: R.short, issues: R.issues.slice(0, 6) }),
 		ui: DIA,
 		minToX: minToX, xToMin: xToMin,
+		// 盤面(Stage1)
+		grid: GRID, board: B, dv: DV,
+		regrid: () => { gridFromParams(); return gridStats(); },
+		gridStats: () => gridStats(),
 		step: sec => {
 			for (let r = sec; r > 0; r -= 30) simulate(Math.min(30, r));
 			renderPax(); uiTick = 1; updateUI(0);
