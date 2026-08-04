@@ -137,10 +137,14 @@ function walkableAt(l, x, z) {
 const B = {
 	t: null,   // 種別
 	f: null,   // 属性ビット(bit0=上家)
-	o: null,   // 設備インスタンスID(0=なし)
+	o: null,   // 設備の永続ID(0=なし)。fid は 65535 を超えうるので Int32
 	objs: null,
+	sk: null,  // gridSkeleton() が書いた骨格の寸法
 	nextId: 1,
 };
+
+// 設備IDの発番。Stage4 では S.nextFid に移す
+function facNextId() { return B.nextId++; }
 
 function gidx(l, x, z) { return (l * GRID.W + x) * GRID.D + z; }
 function inBoard(x, z) { return x >= 0 && x < GRID.W && z >= 0 && z < GRID.D; }
@@ -157,7 +161,7 @@ function boardAlloc() {
 	const n = GRID.W * GRID.D * GRID.L;
 	B.t = new Uint8Array(n);
 	B.f = new Uint8Array(n);
-	B.o = new Uint16Array(n);
+	B.o = new Int32Array(n);
 	B.objs = new Map();
 	B.nextId = 1;
 }
@@ -176,8 +180,8 @@ function isFlowFac(t) { return t === C_GATE || t === C_STAIR || t === C_ESCAL; }
 /* 設備を置く。占有セルに種別とIDを書く。
    改札・階段は乗客の動線そのものなので、あとから置く店や自販機に上書きさせない。
    ここを素通しにすると、盤面から改札が消えて乗客が無賃で通り抜ける */
-function placeFac(kind, l, x, z, w, d, cell, meta) {
-	const id = B.nextId++;
+function placeFac(kind, l, x, z, w, d, cell, fid, meta) {
+	const id = fid;
 	// meta は設備番号(階段 kk / 改札 jj)。B.o はあとから置いた設備に奪われるので、
 	// セル→設備の逆引きは必ずこのレコードから作る
 	let wrote = 0;
@@ -201,7 +205,25 @@ function placeFac(kind, l, x, z, w, d, cell, meta) {
    盤面の上で直接レイアウトする。これで隣接が構造的に保証される */
 const CAR_CELLS = CFG.CAR_LEN / GRID.CELL;   // 1両 = 10マス
 
-function gridFromParams() {
+/* 盤面の指紋。Stage4 で盤面の作りかたを組み替えるとき、
+   「挙動が1セルも変わっていない」ことを機械的に確かめるための物差し。
+   種別・属性ビットと、設備の種別×位置×大きさを混ぜる */
+function boardHash() {
+	let h = 2166136261 >>> 0;
+	const mix = v => { h ^= v & 255; h = Math.imul(h, 16777619) >>> 0; };
+	for (let i = 0; i < B.t.length; i++) { mix(B.t[i]); mix(B.f[i]); }
+	const objs = Array.from(B.objs.values())
+		.map(o => o.k + ':' + o.l + ',' + o.x + ',' + o.z + ',' + o.w + ',' + o.d
+			+ (o.jj !== undefined ? ',j' + o.jj : '') + (o.kk !== undefined ? ',k' + o.plat + '.' + o.kk : ''))
+		.sort();
+	for (const t of objs) for (let i = 0; i < t.length; i++) mix(t.charCodeAt(i));
+	return (h >>> 0).toString(16).padStart(8, '0') + '/' + objs.length;
+}
+
+/* ---- 骨格 ----
+   ホーム・線路・駅舎の外形・出入口・構内踏切。増築ボタンで数を買うもの。
+   設備(改札・階段・店・自販機)は置かない。それは facPlaceAll() の仕事 */
+function gridSkeleton() {
 	boardAlloc();
 	recalcGeometry();
 	const LU = hasLink() ? 1 : 0;                              // 駅舎のレイヤー
@@ -212,8 +234,10 @@ function gridFromParams() {
 	const pz0 = GRID.OZ - Math.floor(plen / 2), pz1 = pz0 + plen - 1;
 
 	G.gx = [];   // 番線 → 左レールのx
+	const px0 = [];   // ホーム面 → 西端のx
 	for (let i = 0; i < S.nPlat; i++) {
 		const x0 = startX + i * unit + 2;                      // ホームの左端
+		px0.push(x0);
 		fillRect(0, x0, x0 + pw - 1, pz0, pz1, C_PLAT);
 		for (let x = x0; x < x0 + pw; x++) {
 			for (let z = pz0; z <= pz1; z++) B.f[gidx(0, x, z)] |= F_ROOF;
@@ -247,21 +271,8 @@ function gridFromParams() {
 	fillRect(LU, fx0, fx1, fz0, fz1, C_FLOOR);
 	fillRect(LU, fx0 + 1, fx1 - 1, fz1, fz1 + 1, C_ENTRANCE);
 
-	if (hasStairs()) {
-		// 階段(2×5マス = 4×10m)。駅舎に覆われた範囲に等間隔で置く
-		const sa = Math.max(pz0 + 1, fz0 + 1), sb = Math.min(pz1 - 5, fz1 - 5);
-		for (let i = 0; i < S.nPlat; i++) {
-			const px = startX + i * unit + 2 + Math.max(0, Math.floor(pw / 2) - 1);
-			for (let k = 0; k < S.stairs; k++) {
-				const sz = (S.stairs === 1 || sb <= sa) ? Math.round((sa + sb) / 2)
-					: Math.round(sa + k * (sb - sa) / (S.stairs - 1));
-				if (sz < 0 || sz + 4 >= GRID.D) continue;
-				placeFac(S.esc ? 'escal' : 'stair', 0, px, sz, 2, 5, S.esc ? C_ESCAL : C_STAIR,
-					{ plat: i, kk: k });        // R.stairFree[plat][k] と対応づける
-			}
-		}
-	} else {
-		// 地平駅は構内踏切。線路を上書きせず属性ビットで重ねる
+	// 地平駅は構内踏切。線路を上書きせず属性ビットで重ねる
+	if (!hasStairs()) {
 		const crz = pz1 + 2;
 		for (let x = startX + 2; x <= fx0; x++) {
 			for (let z = crz; z <= crz + 1; z++) {
@@ -273,15 +284,41 @@ function gridFromParams() {
 		}
 	}
 
+	/* 骨格の寸法。設備の位置はここからの相対で決まるので、
+	   fx0(西端)と pz1(ホーム南端)は「どの増築でも動かない基準点」として扱う */
+	B.sk = { LU: LU, pw: pw, unit: unit, startX: startX, plen: plen,
+		pz0: pz0, pz1: pz1, px0: px0, fx0: fx0, fx1: fx1, fz0: fz0, fz1: fz1 };
+}
+
+/* ---- 設備 ----
+   いまはまだパラメトリックな座標式のまま。Stage4 で S.fac に置き換える */
+function facPlaceAll() {
+	const SK = B.sk, LU = SK.LU;
+
+	if (hasStairs()) {
+		// 階段(2×5マス = 4×10m)。駅舎に覆われた範囲に等間隔で置く
+		const sa = Math.max(SK.pz0 + 1, SK.fz0 + 1), sb = Math.min(SK.pz1 - 5, SK.fz1 - 5);
+		for (let i = 0; i < S.nPlat; i++) {
+			const px = SK.px0[i] + Math.max(0, Math.floor(SK.pw / 2) - 1);
+			for (let k = 0; k < S.stairs; k++) {
+				const sz = (S.stairs === 1 || sb <= sa) ? Math.round((sa + sb) / 2)
+					: Math.round(sa + k * (sb - sa) / (S.stairs - 1));
+				if (sz < 0 || sz + 4 >= GRID.D) continue;
+				placeFac(S.esc ? 'escal' : 'stair', 0, px, sz, 2, 5, S.esc ? C_ESCAL : C_STAIR,
+					facNextId(), { plat: i, kk: k });        // R.stairFree[plat][k] と対応づける
+			}
+		}
+	}
+
 	// 改札(1×1)。駅舎の中に横一列、はみ出したら手前へ折り返す
 	const total = gateCount();
-	const cols = Math.max(1, fx1 - fx0 - 1);
-	const gz = hasLink() ? fz1 - 3 : fz0 + 3;
+	const cols = Math.max(1, SK.fx1 - SK.fx0 - 1);
+	const gz = hasLink() ? SK.fz1 - 3 : SK.fz0 + 3;
 	for (let j = 0; j < total; j++) {
 		const row = Math.floor(j / cols), col = j % cols;
 		const gzz = gz - row * 2;
-		if (gzz > fz0) placeFac(gateIsManual(j) ? 'gateM' : 'gateA', LU, fx0 + 1 + col, gzz, 1, 1, C_GATE,
-			{ jj: j });                        // R.gateFree[j] と対応づける
+		if (gzz > SK.fz0) placeFac(gateIsManual(j) ? 'gateM' : 'gateA', LU, SK.fx0 + 1 + col, gzz, 1, 1, C_GATE,
+			facNextId(), { jj: j });                        // R.gateFree[j] と対応づける
 	}
 
 	/* 駅ナカコンビニ(3×4 = 6×8m = 48m²。NewDaysの平均と一致)と自販機。
@@ -291,20 +328,28 @@ function gridFromParams() {
 	const gzTop = total ? gz - (gRows - 1) * 2 : gz;     // いちばん奥の改札行
 	// 奥(精算済側)に4マス取れれば駅ナカ、無理なら手前(改札外)へ回す
 	let sz = gzTop - 5;
-	if (total && sz < fz0 + 1) sz = gz + 2;
-	if (!total) sz = fz0 + 1;
+	if (total && sz < SK.fz0 + 1) sz = gz + 2;
+	if (!total) sz = SK.fz0 + 1;
 	for (let s = 0; s < S.shops; s++) {
 		const side = s % 2, idx = Math.floor(s / 2);
-		const sx = side ? fx1 - 3 - idx * 4 : fx0 + 1 + idx * 4;
-		if (sx > fx0 && sx + 2 < fx1 && sz > fz0 && sz + 3 <= fz1) placeFac('conv', LU, sx, sz, 3, 4, C_SHOP);
+		const sx = side ? SK.fx1 - 3 - idx * 4 : SK.fx0 + 1 + idx * 4;
+		if (sx > SK.fx0 && sx + 2 < SK.fx1 && sz > SK.fz0 && sz + 3 <= SK.fz1) {
+			placeFac('conv', LU, sx, sz, 3, 4, C_SHOP, facNextId());
+		}
 	}
 	// 自販機は店とぶつからない列に寄せる
-	const vx = S.shops ? fx1 - 1 : fx0 + 1;
+	const vx = S.shops ? SK.fx1 - 1 : SK.fx0 + 1;
 	for (let i = 0; i < Math.min(6, 1 + total / 8); i++) {
-		const vz = Math.min(fz1 - 1, gz + 2 + i);
-		if (vz > fz0 && vz < fz1 && vx > fx0 && vx < fx1) placeFac('vend', LU, vx, vz, 1, 1, C_VEND);
+		const vz = Math.min(SK.fz1 - 1, gz + 2 + i);
+		if (vz > SK.fz0 && vz < SK.fz1 && vx > SK.fx0 && vx < SK.fx1) {
+			placeFac('vend', LU, vx, vz, 1, 1, C_VEND, facNextId());
+		}
 	}
+}
 
+function gridFromParams() {
+	gridSkeleton();
+	facPlaceAll();
 	rebuildDerived();
 	buildWalkGraph();      // Stage3: 盤面から歩行グラフと距離場を起こす(無効化点はここだけ)
 }
@@ -824,6 +869,31 @@ function walkStats() {
 		dropped: WK.stat.dropped, rebuildMs: +WK.stat.rebuildMs.toFixed(2),
 		evicted: WK.stat.evicted, fallback: WK.stat.fallback, stale: WK.stat.stale,
 	};
+}
+
+/* 9構成を順に組んで盤面の指紋だけを取る。
+   盤面の作りかたを組み替えたとき、前後でこの並びが一致すれば「1セルも変わっていない」 */
+function hashSweep() {
+	const keep = JSON.stringify(S);
+	const out = [];
+	const step = label => { resetRuntimeForLayout(); out.push(label + ' = ' + boardHash()); };
+	try {
+		S.link = 0; S.nPlat = 1; S.nTrack = 1; S.cars = 2; S.stairs = 0; S.gateA = 0; S.gateM = 0; S.shops = 0; S.esc = false; S.concW = 0;
+		step('開業 地平1面1線2両 改札0');
+		S.gateA = 4; step('地平 +自動改札4');
+		S.gateM = 2; S.shops = 1; step('地平 +手動2 +店1');
+		S.link = 1; S.stairs = 2; S.cars = 10; step('橋上 1面1線10両 階段2');
+		S.nPlat = 2; S.nTrack = 4; S.gateA = 16; step('橋上 2面4線 改札18');
+		S.nPlat = 4; S.nTrack = 8; S.cars = 15; S.stairs = 4; S.gateA = 34; S.shops = 4; step('橋上 4面8線15両');
+		S.esc = true; step('橋上 4面8線 エスカレータ');
+		S.link = 2; step('地下 4面8線');
+		S.nPlat = 10; S.nTrack = 20; S.stairs = 6; S.gateA = 144; S.shops = 12; S.concW = 8; step('地下 10面20線 新宿級');
+	} finally {
+		S = JSON.parse(keep);
+		resetRuntimeForLayout();
+		buildStation();
+	}
+	return out;
 }
 
 // 増築の順に流して、各段で盤面が健全かを見る
@@ -4559,6 +4629,9 @@ function boot() {
 		// 歩行グラフ(Stage3)。乗客を1人も動かさずに盤面の健全性を測る
 		walkStats: () => walkStats(),
 		walkSweep: () => walkSweep(),
+		boardHash: () => boardHash(),
+		// 9構成を順に組んで盤面の指紋を並べる。作りかたを組み替えても一致するべき
+		hashSweep: () => hashSweep(),
 		// アンカーを盤面のセルへ寄せるか(C3)
 		anchor: on => { WK.anchor = on !== false; resetRuntimeForLayout(); buildStation(); return WK.anchor; },
 		// 距離場で歩かせるか(C5)
