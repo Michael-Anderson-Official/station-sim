@@ -573,18 +573,37 @@ function wkConnected() {
 	return true;
 }
 
-// 全ての階段の外接(コンコース側)。ホーム面ごと
-function wkStairSpan(plat) {
-	const MS = CFG.MAX_STAIRS;
-	let x0 = 1e9, x1 = -1, z0 = 1e9, z1 = -1;
+/* 階段の場の根。ホーム面ごとに、階段そのものが占めるセル(のコンコース側)だけを集める。
+   外接矩形を根にすると、離して置いた2本のあいだのコンコース床まで根になり、
+   「もう着いた」と判定されて場が階段へ案内しなくなる */
+function wkStairRoots(plat, LU) {
+	const out = [];
 	for (const o of B.objs.values()) {
 		if (o.plat !== plat) continue;
 		if (o.k !== 'stair' && o.k !== 'escal') continue;
-		if (o.x < x0) x0 = o.x; if (o.x + o.w - 1 > x1) x1 = o.x + o.w - 1;
-		if (o.z < z0) z0 = o.z; if (o.z + o.d - 1 > z1) z1 = o.z + o.d - 1;
+		for (let i = 0; i < o.w; i++) for (let j = 0; j < o.d; j++) {
+			if (!inBoard(o.x + i, o.z + j)) continue;
+			const k = gidx(LU, o.x + i, o.z + j);
+			if (WK.pass[k] & WK_PASS) out.push(k);
+		}
 	}
-	void MS;
-	return x1 >= 0 ? { x0: x0, x1: x1, z0: z0, z1: z1 } : null;
+	return Int32Array.from(out);
+}
+
+/* 改札の場の根。その行の改札の口セルだけを集める。
+   行の左端から右端までを走りにすると、改札が無い床まで根になり、
+   自由に散らした瞬間に乗客が改札の脇へ吸われて素通りする。
+   paid=true なら精算済側(-Z)、false なら改札外側(+Z) */
+function wkGateRoots(gz, paid) {
+	const out = [];
+	for (let j = 0; j < WK.gateCell.length; j++) {
+		const c = WK.gateCell[j];
+		if (c < 0 || c % GRID.D !== gz) continue;
+		const k = WK.gateMouth[j * 2 + (paid ? 0 : 1)];
+		if (k >= 0 && (WK.pass[k] & WK_PASS)) out.push(k);
+	}
+	out.sort((a, b) => a - b);
+	return Int32Array.from(out);
 }
 
 function wkBuildFields() {
@@ -609,18 +628,19 @@ function wkBuildFields() {
 	zs.forEach((gz, r) => {
 		const g = rows.get(gz);
 		if (r >= WK_MAXGROW) { WK.fGP[r] = -1; WK.fGU[r] = -1; WK.stat.dropped += 2; return; }
-		WK.fGP[r] = wkAddField('GP' + r, wkRun(LU, g.x0, g.x1, gz - 1, false), GRID.D);
-		WK.fGU[r] = wkAddField('GU' + r, wkRun(LU, g.x0, g.x1, gz + 1, false), GRID.D);
+		void g;
+		WK.fGP[r] = wkAddField('GP' + r, wkGateRoots(gz, true), GRID.D);
+		WK.fGU[r] = wkAddField('GU' + r, wkGateRoots(gz, false), GRID.D);
 		for (let j = 0; j < WK.gateCell.length; j++) {
 			if (WK.gateCell[j] >= 0 && WK.gateCell[j] % GRID.D === gz) WK.gateRow[j] = r;
 		}
 	});
 
-	// 階段。ホーム面ごとに、コンコース側の列を「外接する走り」ごと根にする
+	// 階段。ホーム面ごとに、階段そのものが占めるセルだけを根にする
 	WK.fSTAIR.length = 0;
 	for (let i = 0; i < S.nPlat; i++) {
-		const sp = wkStairSpan(i);
-		WK.fSTAIR[i] = sp ? wkAddField('ST' + i, wkCellsOf(LU, sp)) : -1;
+		const roots = wkStairRoots(i, LU);
+		WK.fSTAIR[i] = roots.length ? wkAddField('ST' + i, roots) : -1;
 	}
 
 	// 地平の構内踏切
@@ -2577,7 +2597,7 @@ function newPax() {
 		state: 'walk', until: 0, born: 0, readyAt: undefined, w: 1, sx: 0, sz: 0,
 		ph: 0, head: 0, col: COL_OUT,
 		// Stage3: wkVer=経路を焼いた盤面版数 / jt=横のばらつき / stuckT=詰まり監視 / fx,fz=影
-		wkVer: -1, jt: 0, stuckT: 0, fx: 0, fz: 0 };
+		wkVer: -1, jt: 0, stuckT: 0, atRoot: 0, fRoot: 0, fx: 0, fz: 0 };
 }
 
 function pathOut(p) {
@@ -2832,6 +2852,7 @@ function updatePax(dt) {
 			if (R.now >= p.until) {
 				p.state = 'walk';
 				p.pi++;
+				p.atRoot = 0;
 			} else {
 				// 行列の位置でじりじり進む
 				stepTo(p, p.sx, p.y, p.sz, dt);
@@ -2911,6 +2932,8 @@ function updatePax(dt) {
 			}
 			p.pi++;
 			p.stuckT = 0;                       // ノードが進んだので詰まり時間を戻す
+			p.atRoot = 0;                       // 根に着いた印は脚ごとに解除する
+			p.fRoot = 0;
 			p.fx = p.x; p.fz = p.z;             // 影は脚の境界で同期する
 			if (p.pi >= p.path.length) { finishPax(p); R.pax.splice(i, 1); }
 		} else {
@@ -3038,9 +3061,15 @@ function stepField(p, node, dt) {
 	if (node.climb || node.fid === undefined || node.fid < 0)
 		return stepTo(p, node.x, node.y, node.z, dt, node.climb);
 	if (p.wkVer !== WK.ver) { WK.stat.stale++; return stepTo(p, node.x, node.y, node.z, dt, node.climb); }
+	/* いちど根に着いたら、その脚のあいだは直線に固定する。
+	   場は「設備の集団」までしか案内しないので、同じ面に階段が2本あると
+	   目標の階段へ1歩踏み出した瞬間に勾配が最寄りのもう1本へ引き戻し、
+	   境界で永久に振動する(詰まり監視は動いているので発火しない) */
+	if (p.atRoot) return stepTo(p, node.x, node.y, node.z, dt, node.climb);
 	const k = wkCellOf(node.lay, p.x, p.z);
 	const g = wkSample(node.fid, k);
 	if (!g.ok) { WK.stat.fallback++; return stepTo(p, node.x, node.y, node.z, dt, node.climb); }
+	if (g.at) { p.atRoot = 1; return stepTo(p, node.x, node.y, node.z, dt, node.climb); }
 
 	const dx = node.x - p.x, dz = node.z - p.z;
 	const dRest = Math.hypot(dx, dz);
@@ -3050,15 +3079,11 @@ function stepField(p, node, dt) {
 		p.x = node.x; p.y = node.y; p.z = node.z;
 		return true;
 	}
-	let ux, uz;
-	if (g.at) { ux = dx / dRest; uz = dz / dRest; }   // 根の上 → アンカーへ直線
-	else {
-		// 横のばらつき。全員が同じ折れ線に重なるのを防ぐ。アンカーは動かさないので
-		// 到達判定にも行列の位置にも影響しない
-		const jx = -g.z * p.jt, jz = g.x * p.jt;
-		const nx = g.x + jx, nz = g.z + jz, m = Math.hypot(nx, nz) || 1;
-		ux = nx / m; uz = nz / m;
-	}
+	// 横のばらつき。全員が同じ折れ線に重なるのを防ぐ。アンカーは動かさないので
+	// 到達判定にも行列の位置にも影響しない
+	const jx = -g.z * p.jt, jz = g.x * p.jt;
+	const gnx = g.x + jx, gnz = g.z + jz, gm = Math.hypot(gnx, gnz) || 1;
+	const ux = gnx / gm, uz = gnz / gm;
 	p.x += ux * move; p.z += uz * move;
 	p.head = Math.atan2(ux, uz);
 	// 高さは「アンカーまでの残り水平距離」に比例して詰める。
@@ -3074,9 +3099,15 @@ function auditStep(p, node, dt) {
 	const a = WK.audit;
 	a.n++;
 	if (node.climb || node.fid === undefined || node.fid < 0) { p.fx = p.x; p.fz = p.z; return; }
+	if (p.fRoot) { const d0 = Math.hypot(node.x - p.fx, node.z - p.fz);
+		if (d0 > 0.05) { const mv = CFG.WALK * crowdFactor(p) * (p.spd || 1) * dt;
+			p.fx += (node.x - p.fx) / d0 * Math.min(mv, d0); p.fz += (node.z - p.fz) / d0 * Math.min(mv, d0); }
+		if (a.gap.length < 30000) a.gap.push(Math.hypot(p.fx - p.x, p.fz - p.z));
+		return; }
 	const k = wkCellOf(node.lay, p.fx, p.fz);
 	const g = wkSample(node.fid, k);
 	if (k < 0 || !g.ok) { a.offGraph++; p.fx = p.x; p.fz = p.z; return; }
+	if (g.at) p.fRoot = 1;
 	const dx = node.x - p.fx, dz = node.z - p.fz;
 	const dRest = Math.hypot(dx, dz);
 	const move = CFG.WALK * crowdFactor(p) * (p.spd || 1) * dt;
