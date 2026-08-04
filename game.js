@@ -223,9 +223,25 @@ function boardHash() {
 /* ---- 骨格 ----
    ホーム・線路・駅舎の外形・出入口・構内踏切。増築ボタンで数を買うもの。
    設備(改札・階段・店・自販機)は置かない。それは facPlaceAll() の仕事 */
+/* いまの設備数がちょうど収まる駅舎の大きさ。
+   Stage4 でプレイヤーが床を買うようになるまでの繋ぎで、盤面を焼く直前に呼ぶ。
+   ここを消せば駅舎は S.bldN/bldD/bldW のままになり、改札を買っても動かなくなる */
+function bldFit() {
+	if (hasLink()) {
+		const n = Math.max(4, Math.round(G.over / GRID.CELL));
+		S.bldN = Math.max(S.bldN, n);
+		S.bldD = Math.max(S.bldD, Math.max(8, Math.round(G.concD / GRID.CELL)) - n);
+		S.bldW = Math.max(S.bldW, 0);
+	} else {
+		S.bldW = Math.max(S.bldW, Math.max(6, Math.ceil(gateCount() * 1.2) + 4) - 6);
+		S.bldD = Math.max(S.bldD, Math.max(7, Math.ceil(gateCount() * 0.6) + 6) + (S.shops ? 5 : 0) - 7);
+	}
+}
+
 function gridSkeleton() {
 	boardAlloc();
 	recalcGeometry();
+	bldFit();
 	const LU = hasLink() ? 1 : 0;                              // 駅舎のレイヤー
 	const pw = Math.max(3, Math.round(S.platW / GRID.CELL));   // ホーム幅(マス)
 	const unit = pw + 4;                                       // ホーム + 両側の線路
@@ -253,19 +269,18 @@ function gridSkeleton() {
 		}
 	}
 
-	// 駅舎。橋上/地下はホーム北端にまたがり、地平は線路の外側に建つ
+	/* 駅舎。橋上/地下はホーム北端にまたがり、地平は線路の外側に建つ。
+	   大きさは S.bldN/bldD/bldW(マス)が持つ。fx0 と pz1 はどの拡張でも動かないので、
+	   設備の相対位置の基準点になる */
 	const allX0 = startX, allX1 = startX + S.nPlat * unit - 1;
 	let fx0, fx1, fz0, fz1;
 	if (hasLink()) {
-		fx0 = allX0 - 1; fx1 = allX1 + 1;
-		fz0 = pz1 - Math.max(4, Math.round(G.over / GRID.CELL));
-		fz1 = fz0 + Math.max(8, Math.round(G.concD / GRID.CELL));
+		fx0 = allX0 - 1; fx1 = allX1 + 1 + S.bldW;   // 東へ広がる
+		fz0 = pz1 - S.bldN;                          // 北(ホーム側)へ張り出す
+		fz1 = pz1 + S.bldD;                          // 南(出口側)へ伸びる
 	} else {
-		fx0 = allX1 + 2;
-		fx1 = fx0 + Math.max(6, Math.ceil(gateCount() * 1.2) + 4);
-		fz0 = pz1 + 2;
-		// 店を出すと駅舎そのものが奥行きを増す。改札の帯の手前に店の場所が要る
-		fz1 = fz0 + Math.max(7, Math.ceil(gateCount() * 0.6) + 6) + (S.shops ? 5 : 0);
+		fx0 = allX1 + 2; fx1 = fx0 + 6 + S.bldW;
+		fz0 = pz1 + 2;   fz1 = fz0 + 7 + S.bldD;
 	}
 	fx1 = Math.min(GRID.W - 2, fx1); fz1 = Math.min(GRID.D - 3, fz1);
 	fillRect(LU, fx0, fx1, fz0, fz1, C_FLOOR);
@@ -1161,6 +1176,8 @@ function defaultState() {
 		gateM: 0,             // 手動改札(駅員配置)の通路数
 		gateA: 0,             // 自動改札の通路数
 		concW: 0,             // コンコースの片側拡張幅
+		// 駅舎の大きさ(マス)。北=ホーム側への張り出し / 南=出口側の奥行き / 東への拡幅
+		bldN: 0, bldD: 0, bldW: 0,
 		shops: 0,             // 駅ナカ店舗
 		// 駅周辺の開発。これが乗客の源。開業時は小さな住宅地が1つあるだけ
 		devs: { home1: 1 },
@@ -3422,6 +3439,10 @@ function load() {
 		// 実際の島式ホームと同じく、番線の偶数奇数で上下に振り分ける
 		if (!Array.isArray(S.trackDir)) S.trackDir = [];
 		for (let t = 0; t < S.nTrack; t++) if (S.trackDir[t] === undefined) S.trackDir[t] = t % 2;
+		// 駅舎の大きさを持っていなかった頃のセーブ。bldFit() が焼く直前に埋めるので0で足りる
+		if (typeof S.bldN !== 'number') S.bldN = 0;
+		if (typeof S.bldD !== 'number') S.bldD = 0;
+		if (typeof S.bldW !== 'number') S.bldW = 0;
 		if (!Array.isArray(S.runs)) S.runs = [];
 		S.runId = Math.max(1, S.runId | 0);
 		for (const r of S.runs) if (r.id >= S.runId) S.runId = r.id + 1;
