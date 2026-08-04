@@ -46,7 +46,29 @@
 
 <button id="buildBtn">🏗 増築</button>
 <button id="diaBtn">🕒 ダイヤ</button>
+<button id="planBtn">🗺 配置</button>
 <button id="logBtn">📋 日報</button>
+
+<section id="planView" hidden>
+	<div id="planHead">
+		<b>🗺 配置</b>
+		<button id="planSwap">⇅ <span id="planLayer">コンコース</span></button>
+		<button id="planFit">⤢ 全体</button>
+		<span id="planInfo"></span>
+		<button id="planClose">✕</button>
+	</div>
+	<canvas id="planCv"></canvas>
+	<div id="planLegend">
+		<i style="background:#3a4152"></i>床
+		<i style="background:#5b6472"></i>ホーム
+		<i style="background:#2f7de0"></i>改札
+		<i style="background:#c8a05a"></i>階段
+		<i style="background:#d8663c"></i>店
+		<i style="background:#e0b040"></i>自販機
+		<i style="background:#3d7a56"></i>出入口
+		<i style="background:#2b2f38"></i>線路
+	</div>
+</section>
 
 <section id="sheet" hidden>
 	<div class="sheetHead">

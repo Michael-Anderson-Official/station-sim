@@ -86,7 +86,7 @@ html, body {
 @keyframes pop { from { opacity: 0; transform: translateY(-6px); } }
 
 /* ===== 下部ボタン ===== */
-#buildBtn, #logBtn, #diaBtn {
+#buildBtn, #logBtn, #diaBtn, #planBtn {
 	position: fixed; bottom: calc(env(safe-area-inset-bottom) + 14px); z-index: 6;
 	border: none; border-radius: 999px; font-weight: 800; font-size: 14px;
 	padding: 12px 20px; box-shadow: 0 3px 12px rgba(0,0,0,.45);
@@ -94,8 +94,34 @@ html, body {
 }
 #buildBtn { right: 12px; background: #f0a020; color: #2a1c00; }
 #diaBtn { right: 106px; background: #2f7de0; color: #fff; }
+#planBtn { right: 200px; background: #4a9d6a; color: #fff; }
 #logBtn { left: 12px; background: rgba(30,42,60,.92); color: #cfe0f5; font-size: 12px; padding: 10px 14px; }
-#buildBtn:active, #logBtn:active, #diaBtn:active { transform: scale(.96); }
+#buildBtn:active, #logBtn:active, #diaBtn:active, #planBtn:active { transform: scale(.96); }
+
+/* ===== 2Dの配置ビュー ===== */
+#planView {
+	position: fixed; inset: 0; z-index: 30; background: #0f1622;
+	display: flex; flex-direction: column;
+	padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom);
+}
+#planHead {
+	display: flex; align-items: center; gap: 6px; padding: 8px 10px; flex: none;
+	background: rgba(11,17,27,.94);
+}
+#planHead b { font-size: 14px; font-weight: 800; }
+#planHead button {
+	border: none; background: rgba(255,255,255,.1); color: #e8eef7;
+	font-family: inherit; font-size: 12px; font-weight: 700;
+	padding: 8px 10px; border-radius: 8px; min-height: 36px;
+}
+#planHead #planClose { margin-left: 0; background: rgba(255,255,255,.14); width: 36px; }
+#planInfo { margin-left: auto; font-size: 10px; opacity: .6; text-align: right; line-height: 1.3; }
+#planCv { flex: 1; width: 100%; display: block; touch-action: none; background: #171d28; }
+#planLegend {
+	flex: none; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center;
+	padding: 8px 10px; font-size: 10px; opacity: .8; background: rgba(11,17,27,.94);
+}
+#planLegend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 3px; vertical-align: -1px; }
 
 /* ===== ダイヤシート ===== */
 #diaSheet {

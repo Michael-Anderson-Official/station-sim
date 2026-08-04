@@ -3813,6 +3813,244 @@ function resetRuntimeForLayout() {
 	compileSched();
 }
 
+
+/* ================= 2Dの配置ビュー =================
+   盤面をそのまま真上から見る。駅は細長い(新宿級で72×172マス)ので、
+   盤面ぜんぶを画面に収める倍率は存在しない。
+   世界を「置ける領域 + 余白4マス」に絞ったうえで、パンとピンチで動かす */
+const PLAN = {
+	open: false,
+	s: 20,            // 1マスのpt
+	ox: 0, oz: 0,     // 画面左上に来る盤面座標(マス、実数)
+	lay: 0,           // 表示中のレイヤー
+	cv: null, ctx: null, w: 0, h: 0, dpr: 1,
+	ptr: new Map(),   // pointerId → {x,y}  2本指を取りこぼさないため
+	pinch: null,
+	drag: null,
+	savedSpeed: undefined,
+	dirty: true,
+};
+
+// セルの色。置ける床は明るく、置けない所は暗く
+const PLAN_COL = {};
+PLAN_COL[C_EMPTY] = null;
+PLAN_COL[C_RAIL_L] = '#2b2f38';
+PLAN_COL[C_RAIL_R] = '#2b2f38';
+PLAN_COL[C_PLAT] = '#5b6472';
+PLAN_COL[C_FLOOR] = '#3a4152';
+PLAN_COL[C_WALL] = '#8a8f99';
+PLAN_COL[C_STAIR] = '#c8a05a';
+PLAN_COL[C_ESCAL] = '#d8b46a';
+PLAN_COL[C_GATE] = '#2f7de0';
+PLAN_COL[C_SHOP] = '#d8663c';
+PLAN_COL[C_VEND] = '#e0b040';
+PLAN_COL[C_BENCH] = '#7a6a52';
+PLAN_COL[C_PILLAR] = '#6a7080';
+PLAN_COL[C_ENTRANCE] = '#3d7a56';
+
+/* いま見ているレイヤーの中身の外接。ここに余白を足したものが2Dビューの世界。
+   駅全体に合わせるとホームが200m あるせいでコンコースが画面の外に出る */
+function planEditableBBox(lay) {
+	const l = lay === undefined ? PLAN.lay : lay;
+	let x0 = 1e9, x1 = -1, z0 = 1e9, z1 = -1;
+	const hit = (x, z) => { if (x < x0) x0 = x; if (x > x1) x1 = x; if (z < z0) z0 = z; if (z > z1) z1 = z; };
+	for (let x = 0; x < GRID.W; x++) for (let z = 0; z < GRID.D; z++) {
+		const t = B.t[gidx(l, x, z)];
+		if (t === C_EMPTY || t === C_RAIL_L || t === C_RAIL_R) continue;   // 線路は端から端まであるので外す
+		hit(x, z);
+	}
+	if (x1 < 0) { x0 = GRID.OX - 8; x1 = GRID.OX + 8; z0 = GRID.OZ - 8; z1 = GRID.OZ + 8; }
+	return { x0: x0, x1: x1, z0: z0, z1: z1, w: x1 - x0 + 1, d: z1 - z0 + 1 };
+}
+
+function planFit() {
+	const b = planEditableBBox();
+	PLAN.s = Math.max(12, Math.min(40, Math.min(PLAN.w / (b.w + 4), PLAN.h / (b.d + 4))));
+	// 横は領域の中央に寄せる
+	PLAN.ox = b.x0 - 2 - Math.max(0, (PLAN.w / PLAN.s - (b.w + 4)) / 2);
+	/* 縦は「設備のある高さ」に寄せる。ホームは200m あって画面に入りきらないので、
+	   真ん中に合わせると階段も改札も画面の外に出てしまう */
+	let cz = (b.z0 + b.z1) / 2, n = 0, sum = 0;
+	for (const o of B.objs.values()) if (o.l === PLAN.lay) { sum += o.z + o.d / 2; n++; }
+	if (n) cz = sum / n;
+	PLAN.oz = Math.min(b.z1 + 2 - PLAN.h / PLAN.s, Math.max(b.z0 - 2, cz - PLAN.h / PLAN.s / 2));
+	if (b.d + 4 < PLAN.h / PLAN.s) PLAN.oz = b.z0 - 2 - (PLAN.h / PLAN.s - (b.d + 4)) / 2;
+}
+
+function planResize() {
+	const cv = PLAN.cv;
+	if (!cv) return;
+	PLAN.dpr = Math.min(window.devicePixelRatio || 1, 2);
+	const r = cv.getBoundingClientRect();
+	PLAN.w = Math.max(200, r.width);
+	PLAN.h = Math.max(200, r.height);
+	cv.width = Math.round(PLAN.w * PLAN.dpr);
+	cv.height = Math.round(PLAN.h * PLAN.dpr);
+	PLAN.ctx.setTransform(PLAN.dpr, 0, 0, PLAN.dpr, 0, 0);
+	PLAN.dirty = true;
+}
+
+// 画面px ↔ 盤面セル。cx()/cz() と同じく Math.floor を使う(西半分は座標が負)
+function planPxToCellF(px, py) { return { x: PLAN.ox + px / PLAN.s, z: PLAN.oz + py / PLAN.s }; }
+function planPxToCell(px, py) {
+	const f = planPxToCellF(px, py);
+	return { x: Math.floor(f.x), z: Math.floor(f.z) };
+}
+
+function planDraw() {
+	if (!PLAN.ctx || !PLAN.w) return;
+	const g = PLAN.ctx, s = PLAN.s;
+	g.fillStyle = '#171d28';
+	g.fillRect(0, 0, PLAN.w, PLAN.h);
+
+	const x0 = Math.max(0, Math.floor(PLAN.ox)), z0 = Math.max(0, Math.floor(PLAN.oz));
+	const x1 = Math.min(GRID.W - 1, Math.ceil(PLAN.ox + PLAN.w / s));
+	const z1 = Math.min(GRID.D - 1, Math.ceil(PLAN.oz + PLAN.h / s));
+	const LU = hasLink() ? 1 : 0;
+	const other = PLAN.lay === 0 ? LU : 0;
+
+	// 見えている範囲だけ描く。盤面ぜんぶ(39,424セル)を毎回描くと重い
+	for (let x = x0; x <= x1; x++) {
+		const sx = (x - PLAN.ox) * s;
+		for (let z = z0; z <= z1; z++) {
+			const sz = (z - PLAN.oz) * s;
+			// 裏のレイヤーを薄く敷いて、上下の位置関係が分かるようにする
+			if (other !== PLAN.lay) {
+				const tb = B.t[gidx(other, x, z)];
+				const cb = PLAN_COL[tb];
+				if (cb) { g.globalAlpha = 0.18; g.fillStyle = cb; g.fillRect(sx, sz, s, s); g.globalAlpha = 1; }
+			}
+			const t = B.t[gidx(PLAN.lay, x, z)];
+			const c = PLAN_COL[t];
+			if (c) { g.fillStyle = c; g.fillRect(sx, sz, s, s); }
+			// 構内踏切は縞で重ねる
+			if (B.f[gidx(PLAN.lay, x, z)] & F_CROSS) {
+				g.fillStyle = 'rgba(224,176,64,.35)';
+				g.fillRect(sx, sz, s, s * 0.35);
+			}
+		}
+	}
+
+	// 設備の枠。1マスのものは点、大きいものは外形を描く
+	if (s >= 8) {
+		g.lineWidth = 1;
+		for (const o of B.objs.values()) {
+			if (o.l !== PLAN.lay) continue;
+			if (o.x + o.w < x0 || o.x > x1 || o.z + o.d < z0 || o.z > z1) continue;
+			g.strokeStyle = 'rgba(255,255,255,.35)';
+			g.strokeRect((o.x - PLAN.ox) * s + .5, (o.z - PLAN.oz) * s + .5, o.w * s - 1, o.d * s - 1);
+		}
+	}
+	// マス目
+	if (s >= 10) {
+		g.strokeStyle = 'rgba(255,255,255,.05)'; g.lineWidth = 1;
+		g.beginPath();
+		for (let x = x0; x <= x1 + 1; x++) { const sx = Math.round((x - PLAN.ox) * s) + .5; g.moveTo(sx, 0); g.lineTo(sx, PLAN.h); }
+		for (let z = z0; z <= z1 + 1; z++) { const sz = Math.round((z - PLAN.oz) * s) + .5; g.moveTo(0, sz); g.lineTo(PLAN.w, sz); }
+		g.stroke();
+	}
+	PLAN.dirty = false;
+}
+
+function initPlanCanvas() {
+	const cv = PLAN.cv = document.getElementById('planCv');
+	PLAN.ctx = cv.getContext('2d');
+
+	const local = e => { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+
+	cv.addEventListener('pointerdown', e => {
+		cv.setPointerCapture(e.pointerId);
+		PLAN.ptr.set(e.pointerId, local(e));
+		if (PLAN.ptr.size === 2) {
+			const v = Array.from(PLAN.ptr.values());
+			PLAN.pinch = { d0: Math.hypot(v[0].x - v[1].x, v[0].y - v[1].y) || 1, s0: PLAN.s };
+			PLAN.drag = null;
+		} else if (PLAN.ptr.size === 1) {
+			PLAN.drag = Object.assign({}, local(e));
+		}
+	});
+
+	cv.addEventListener('pointermove', e => {
+		if (!PLAN.ptr.has(e.pointerId)) return;
+		PLAN.ptr.set(e.pointerId, local(e));
+		if (PLAN.ptr.size >= 2 && PLAN.pinch) {
+			// 2本指の中点にあるセルを固定点にして拡大縮小する
+			const v = Array.from(PLAN.ptr.values()), a = v[0], b = v[1];
+			const d = Math.hypot(a.x - b.x, a.y - b.y);
+			const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+			const c0 = planPxToCellF(mx, my);
+			PLAN.s = Math.max(4, Math.min(40, PLAN.pinch.s0 * d / PLAN.pinch.d0));
+			PLAN.ox = c0.x - mx / PLAN.s;
+			PLAN.oz = c0.z - my / PLAN.s;
+			PLAN.dirty = true;
+		} else if (PLAN.drag) {
+			const p = local(e);
+			PLAN.ox -= (p.x - PLAN.drag.x) / PLAN.s;
+			PLAN.oz -= (p.y - PLAN.drag.y) / PLAN.s;
+			PLAN.drag = p;
+			PLAN.dirty = true;
+		}
+		if (PLAN.dirty) planDraw();
+	});
+
+	const up = e => {
+		PLAN.ptr.delete(e.pointerId);
+		if (PLAN.ptr.size < 2) PLAN.pinch = null;
+		if (PLAN.ptr.size === 0) PLAN.drag = null;
+		else PLAN.drag = Array.from(PLAN.ptr.values())[0];   // 指が1本残ったらそこからパンを続ける
+	};
+	cv.addEventListener('pointerup', up);
+	cv.addEventListener('pointercancel', up);
+}
+
+function planLayerName(l) {
+	if (!hasLink()) return '地上';
+	return l === 0 ? 'ホーム' : (isUnder() ? '地下コンコース' : '橋上コンコース');
+}
+
+function renderPlanHead() {
+	const el = document.getElementById('planLayer');
+	if (el) el.textContent = planLayerName(PLAN.lay);
+	const sw = document.getElementById('planSwap');
+	if (sw) sw.hidden = !hasLink();
+	const info = document.getElementById('planInfo');
+	if (info) {
+		const f = S.fac.length, off = S.fac.filter(r => r.off).length;
+		info.textContent = '設備' + f + '個' + (off ? ' / 休止' + off : '') + ' · ' + PLAN.s.toFixed(0) + 'pt/マス';
+	}
+}
+
+function openPlan() {
+	PLAN.open = true;
+	document.getElementById('planView').hidden = false;
+	PLAN.savedSpeed = R.speed;
+	R.speed = 0;                       // 見ているあいだは時間を止める
+	document.querySelectorAll('#speed button').forEach(x => x.classList.toggle('active', +x.dataset.speed === 0));
+	if (!PLAN.cv) initPlanCanvas();
+	PLAN.lay = hasLink() ? 1 : 0;
+	planResize(); planFit(); renderPlanHead(); planDraw();
+}
+
+function closePlan() {
+	PLAN.open = false;
+	document.getElementById('planView').hidden = true;
+	if (PLAN.savedSpeed !== undefined) {
+		R.speed = PLAN.savedSpeed;
+		document.querySelectorAll('#speed button').forEach(x => x.classList.toggle('active', +x.dataset.speed === R.speed));
+	}
+}
+
+function initPlanUI() {
+	document.getElementById('planBtn').onclick = openPlan;
+	document.getElementById('planClose').onclick = closePlan;
+	document.getElementById('planSwap').onclick = () => {
+		PLAN.lay = PLAN.lay === 0 ? (hasLink() ? 1 : 0) : 0;
+		planFit(); renderPlanHead(); planDraw();
+	};
+	document.getElementById('planFit').onclick = () => { planFit(); renderPlanHead(); planDraw(); };
+	window.addEventListener('resize', () => { if (PLAN.open) { planResize(); planFit(); planDraw(); } });
+}
+
 /* ================= ダイヤ編集UI =================
    番線別のタイムライン。帯は展開されたスジ、編集の実体はパターン(S.dia) */
 const DIA = {
@@ -4675,6 +4913,7 @@ function loop(now) {
 	last = now;
 
 	if (R.speed > 0) simulate(rdt * R.speed);
+	if (PLAN.open) return;      // 2Dの配置ビュー中は3Dを描かない
 
 	renderPax();
 	updateGateArms(rdt);
@@ -4692,6 +4931,7 @@ function boot() {
 	resetRuntimeForLayout();
 	buildStation();
 	fitCamera();
+	initPlanUI();
 	G.night = -1;
 	updateSky();
 	renderLog();
@@ -4751,7 +4991,7 @@ function boot() {
 		ui: DIA,
 		minToX: minToX, xToMin: xToMin,
 		// 盤面(Stage1)
-		grid: GRID, board: B, dv: DV, wk: WK,
+		grid: GRID, board: B, dv: DV, wk: WK, plan: PLAN,
 		regrid: () => { gridFromParams(); return gridStats(); },
 		// 歩行グラフ(Stage3)。乗客を1人も動かさずに盤面の健全性を測る
 		walkStats: () => walkStats(),
