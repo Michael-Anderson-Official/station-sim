@@ -16,9 +16,12 @@ const CFG = {
 	APPROACH_T: 14,        // 進入・退出にかかる秒数
 	APPROACH_LEN: 260,     // 進入・退出で走る距離(m)
 	OCC_IN: 30,            // 前の列車が抜けてから次が入線できるまで(秒)
-	HEAD_SAME: 120,        // 続行間隔: 同種別(秒)
-	HEAD_SLOW_FAST: 480,   // 続行間隔: 遅い種別の直後に速い種別(秒)
-	HEAD_FAST_SLOW: 120,   // 続行間隔: 速い種別の直後に遅い種別(秒)
+	// 発車間隔。本線(駅の外の線路)と番線(ホームの線路)で別々に効く。
+	// 1本線に2番線を交互に使えば、番線120秒の制約を守ったまま本線60秒が出せる
+	LINE_HEAD: 60,         // 同一本線の最小発車間隔(信号の間隔)
+	TRACK_HEAD: 120,       // 同一番線の最小発車間隔(停車+進入退出)
+	HEAD_SLOW_FAST: 480,   // 同一本線で遅い種別の直後に速い種別(追いついてしまう)
+	MAX_LINES: 6,          // 本線の最大数
 	ENTER_WINDOW: 2700,    // この先これだけの間に乗れるスジが無ければ客は入場しない(秒)
 	FAST_SHARE: 0.35,      // 優等が走っているとき「速い列車を待つ」客の割合
 	PREF_GIVEUP: 720,      // これだけ待つと妥協して普通にも乗る(秒)
@@ -184,7 +187,9 @@ function defaultState() {
 		cars: 2,              // ホーム有効長(両)
 		link: 0,              // ホームへの動線 0=地平(構内踏切) 1=橋上駅舎 2=地下道
 		nPlat: 1,             // ホーム面数
-		nTrack: 1,            // 線路本数
+		nTrack: 1,            // 線路本数(番線)
+		lines: 1,             // 本線の数(駅の外へ出ていく線路)
+		trackLine: [0],       // 番線 → どの本線に属するか
 		platW: 6,             // ホーム幅
 		stairs: 0,            // 各ホームの階段数(地平駅では0)
 		esc: false,           // エスカレーター化
@@ -1545,10 +1550,23 @@ function fleetHave(mid, cars) {
 	return f ? f.n : 0;
 }
 
-// 続行間隔: 遅い種別の直後に速い種別を出すと大きく空ける必要がある
+/* 同一本線での続行間隔。
+   遅い種別の直後に速い種別を出すと追いついてしまうので大きく空ける。
+   それ以外は信号の間隔(LINE_HEAD)まで詰められる */
 function headwayFor(prevTy, nextTy) {
-	if (prevTy === nextTy) return CFG.HEAD_SAME;
-	return TYPES[nextTy].kmh > TYPES[prevTy].kmh ? CFG.HEAD_SLOW_FAST : CFG.HEAD_FAST_SLOW;
+	return TYPES[nextTy].kmh > TYPES[prevTy].kmh ? CFG.HEAD_SLOW_FAST : CFG.LINE_HEAD;
+}
+
+// その番線が属する本線
+function lineOf(track) {
+	const a = S.trackLine || [];
+	return Math.min(S.lines - 1, Math.max(0, a[track] === undefined ? track % S.lines : a[track]));
+}
+// 番線が足りているか。1本線に2番線あれば本線の60秒間隔を出しきれる
+function lineTracks(line) {
+	let n = 0;
+	for (let t = 0; t < S.nTrack; t++) if (lineOf(t) === line) n++;
+	return n;
 }
 
 function compileSched() {
@@ -1593,21 +1611,38 @@ function compileSched() {
 		lastOnTrack[s.track] = s;
 	}
 
-	// 2b. 発車順は全番線で共通(駅の外は単線で追い越しが起きない)。
-	//     基準にするのは「有効な直前のスジ」。無効なスジを基準にすると失格が連鎖する
+	// 2b. 発車間隔は「本線ごと」と「番線ごと」の2本立て。
+	//     本線は駅の外の線路なので追い越しが起きず、種別差で間隔が伸びる。
+	//     番線はホームの線路で、停車と進入退出のぶん最低120秒空く。
+	//     1本線に2番線あれば、番線120秒を守ったまま本線60秒の発車が出せる。
 	out.sort((a, b) => a.dep - b.dep);
-	let prev = null;
+	const lastOnLine = [];      // 本線ごとの直前の有効スジ
+	const lastDepTrack = [];    // 番線ごとの直前の発車時刻
 	for (const s of out) {
 		if (!s.ok) continue;
-		if (prev) {
-			const need = headwayFor(prev.ty, s.ty);
-			if (s.dep - prev.dep < need) {
+		s.line = lineOf(s.track);
+
+		const pd = lastDepTrack[s.track];
+		if (pd !== undefined && s.dep - pd < CFG.TRACK_HEAD) {
+			s.ok = false;
+			issues.push({ dia: s.dia, at: s.dep, msg: (s.track + 1) + '番線は' + Math.round(CFG.TRACK_HEAD / 60) + '分に1本まで' });
+			continue;
+		}
+
+		const p = lastOnLine[s.line];
+		if (p) {
+			const need = Math.max(CFG.LINE_HEAD, headwayFor(p.ty, s.ty));
+			if (s.dep - p.dep < need) {
 				s.ok = false;
-				issues.push({ dia: s.dia, at: s.dep, msg: TYPES[prev.ty].name + 'の' + Math.round(need / 60) + '分後まで' + TYPES[s.ty].name + 'は発車できない' });
+				const why = p.ty === s.ty
+					? '本線' + (s.line + 1) + 'は' + Math.round(need / 60) + '分に1本まで'
+					: TYPES[p.ty].name + 'の' + Math.round(need / 60) + '分後まで' + TYPES[s.ty].name + 'は発車できない';
+				issues.push({ dia: s.dia, at: s.dep, msg: why });
 				continue;
 			}
 		}
-		prev = s;
+		lastOnLine[s.line] = s;
+		lastDepTrack[s.track] = s.dep;
 	}
 
 	// 3. 契約している編成の本数で運用できるスジだけを残す。
@@ -2296,6 +2331,9 @@ function load() {
 		if (typeof o.cars !== 'number') S.cars = 10;
 		S.cars = Math.max(CFG.CARS_MIN, Math.min(CFG.CARS_MAX, Math.round(S.cars)));
 		// 契約・ダイヤが無かった頃のセーブは白紙で始める
+		// 本線が無かった頃のセーブは、番線をまとめて1本線に載せる
+		S.lines = Math.max(1, Math.min(CFG.MAX_LINES, Math.round(S.lines || 1)));
+		if (!Array.isArray(S.trackLine)) S.trackLine = [];
 		if (!Array.isArray(S.fleet)) S.fleet = [];
 		if (!Array.isArray(S.dia)) S.dia = [];
 		S.diaId = Math.max(1, S.diaId | 0);
@@ -2385,6 +2423,17 @@ const UPGRADES = [
 		can: () => S.gateA < 220,
 		ng: () => '上限',
 		apply: () => { S.gateA++; },
+	},
+	{
+		id: 'line', ic: '🧭', name: '本線を増設',
+		desc: () => '駅の外へ出ていく線路を1本増やす。本線は' + Math.round(CFG.LINE_HEAD / 60)
+			+ '分に1本まで発車でき、1本線に2番線を交互に使うとその上限を出しきれる。現在 '
+			+ S.lines + '本線 / 番線' + S.nTrack + '（理論上限 '
+			+ Math.min(S.lines * 3600 / CFG.LINE_HEAD, S.nTrack * 3600 / CFG.TRACK_HEAD) + '本/時）',
+		cost: () => 18000000 * Math.pow(1.55, S.lines - 1),
+		can: () => S.lines < CFG.MAX_LINES && S.nTrack > S.lines,
+		ng: () => S.lines >= CFG.MAX_LINES ? '上限' : '先に番線を増設',
+		apply: () => { S.lines++; },
 	},
 	{
 		id: 'track', ic: '🛤', name: '線路を増設',
@@ -2756,7 +2805,33 @@ function renderDiaList() {
 	if (!S.dia.length) {
 		el.innerHTML = '<p class="hint">パターンがありません。まず「契約」タブで編成を契約してから、下の＋で追加してください。</p>';
 	}
+	if (S.nTrack > 1 || S.lines > 1) el.appendChild(buildLineMap());
 	renderDiaStat();
+}
+
+/* 番線がどの本線に属するか。1本線に2番線を割り当てると1分間隔が出せる */
+function buildLineMap() {
+	const box = document.createElement('div');
+	box.style.cssText = 'background:rgba(0,0,0,.22);border-radius:9px;padding:8px 9px;margin-top:8px;';
+	const cap = Math.min(S.lines * 3600 / CFG.LINE_HEAD, S.nTrack * 3600 / CFG.TRACK_HEAD);
+	box.innerHTML = '<p class="hint" style="margin:0 0 6px">番線と本線の割り当て　'
+		+ '<b style="color:#7ee0a0">理論上限 ' + cap + '本/時</b></p>';
+	for (let t = 0; t < S.nTrack; t++) {
+		box.appendChild(stepper((t + 1) + '番線', () => lineOf(t),
+			v => {
+				const n = S.lines;
+				if (!S.trackLine) S.trackLine = [];
+				S.trackLine[t] = ((v % n) + n) % n;
+			}, v => '本線' + (v + 1)));
+	}
+	const note = document.createElement('p');
+	note.className = 'hint';
+	note.style.margin = '6px 2px 0';
+	const per = [];
+	for (let l = 0; l < S.lines; l++) per.push('本線' + (l + 1) + ':' + lineTracks(l) + '番線');
+	note.textContent = per.join(' / ') + '　同じ本線に2番線あると、交互発車で本線の上限まで出せます。';
+	box.appendChild(note);
+	return box;
 }
 
 // step は増減の刻み。丸め幅より小さいと押しても値が戻ってしまうので必ず合わせる
