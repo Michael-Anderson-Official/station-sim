@@ -84,15 +84,95 @@ html, body {
 @keyframes pop { from { opacity: 0; transform: translateY(-6px); } }
 
 /* ===== 下部ボタン ===== */
-#buildBtn, #logBtn {
+#buildBtn, #logBtn, #diaBtn {
 	position: fixed; bottom: calc(env(safe-area-inset-bottom) + 14px); z-index: 6;
 	border: none; border-radius: 999px; font-weight: 800; font-size: 14px;
 	padding: 12px 20px; box-shadow: 0 3px 12px rgba(0,0,0,.45);
 	font-family: inherit;
 }
 #buildBtn { right: 12px; background: #f0a020; color: #2a1c00; }
+#diaBtn { right: 106px; background: #2f7de0; color: #fff; }
 #logBtn { left: 12px; background: rgba(30,42,60,.92); color: #cfe0f5; font-size: 12px; padding: 10px 14px; }
-#buildBtn:active, #logBtn:active { transform: scale(.96); }
+#buildBtn:active, #logBtn:active, #diaBtn:active { transform: scale(.96); }
+
+/* ===== ダイヤシート ===== */
+#diaSheet {
+	position: fixed; left: 0; right: 0; bottom: 0; z-index: 21;
+	max-height: 88vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+	background: #16202e; border-radius: 16px 16px 0 0;
+	padding: 12px 12px calc(env(safe-area-inset-bottom) + 16px);
+	box-shadow: 0 -4px 24px rgba(0,0,0,.5);
+	animation: rise .22s ease-out;
+}
+#diaStat { margin-left: auto; margin-right: 8px; font-size: 10px; line-height: 1.4; text-align: right; opacity: .85; }
+#diaStat b { color: #7ee0a0; }
+#diaStat i { font-style: normal; color: #ff8a7a; }
+
+.seg { display: flex; gap: 4px; background: rgba(255,255,255,.06); padding: 3px; border-radius: 9px; margin-bottom: 8px; }
+.seg button {
+	flex: 1; border: none; background: transparent; color: #9fb0c4;
+	font-family: inherit; font-size: 12px; font-weight: 800; padding: 7px; border-radius: 7px;
+}
+.seg button.on { background: #2f7de0; color: #fff; }
+
+#diaZoom { display: flex; gap: 4px; align-items: center; margin-bottom: 6px; }
+#diaZoom button {
+	border: none; background: rgba(255,255,255,.08); color: #cfe0f5;
+	font-family: inherit; font-size: 11px; font-weight: 700; padding: 5px 9px; border-radius: 6px;
+}
+#diaZoom button.on { background: rgba(47,125,224,.85); color: #fff; }
+#diaClock { margin-left: auto; font-size: 11px; opacity: .7; font-variant-numeric: tabular-nums; }
+
+#diaCv { width: 100%; display: block; border-radius: 8px; background: #0f1622; touch-action: none; }
+
+#diaList { margin-top: 8px; }
+.diaRow {
+	display: flex; align-items: center; gap: 7px; width: 100%;
+	background: rgba(255,255,255,.06); border: 1px solid transparent;
+	border-radius: 9px; padding: 8px 9px; margin-bottom: 6px;
+	color: #e8eef7; font-family: inherit; text-align: left;
+}
+.diaRow.sel { border-color: #2f7de0; background: rgba(47,125,224,.16); }
+.diaRow.bad { border-color: #c8503c; }
+.diaRow .ty { flex: none; width: 22px; height: 22px; border-radius: 5px; font-size: 11px; font-weight: 800;
+	display: flex; align-items: center; justify-content: center; color: #10161d; }
+.diaRow .tx { flex: 1; min-width: 0; }
+.diaRow .tx b { display: block; font-size: 12px; font-weight: 800; }
+.diaRow .tx span { display: block; font-size: 10px; opacity: .6; margin-top: 1px; }
+.diaRow .del { flex: none; border: none; background: rgba(200,60,50,.2); color: #ff9a8a;
+	width: 26px; height: 26px; border-radius: 6px; font-size: 13px; }
+
+.stepRow { display: flex; align-items: center; gap: 6px; margin: 5px 0; font-size: 11px; }
+.stepRow > span { width: 66px; opacity: .7; flex: none; }
+.stepRow .val { min-width: 62px; text-align: center; font-weight: 800; font-variant-numeric: tabular-nums; }
+.stepRow button {
+	border: none; background: rgba(255,255,255,.1); color: #e8eef7;
+	width: 30px; height: 28px; border-radius: 7px; font-size: 15px; font-family: inherit;
+}
+.stepRow .wide { flex: 1; width: auto; font-size: 11px; font-weight: 700; }
+
+#diaAdd {
+	width: 100%; padding: 10px; border: none; border-radius: 9px; margin-top: 2px;
+	background: rgba(47,125,224,.22); color: #8fc4ff; font-size: 12px; font-weight: 800; font-family: inherit;
+}
+#diaIssues { margin-top: 8px; }
+#diaIssues div { font-size: 10px; color: #ff9a8a; line-height: 1.6; }
+
+.sub { font-size: 12px; font-weight: 800; margin: 10px 0 6px; opacity: .8; }
+.mdl {
+	background: rgba(255,255,255,.06); border-radius: 9px; padding: 9px; margin-bottom: 6px;
+}
+.mdl .h { display: flex; align-items: baseline; gap: 6px; }
+.mdl .h b { font-size: 13px; font-weight: 800; }
+.mdl .h span { font-size: 10px; opacity: .6; }
+.mdl .h i { margin-left: auto; font-style: normal; font-size: 10px; opacity: .7; }
+.mdl .cars { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 7px; }
+.mdl .cars button {
+	border: none; background: rgba(47,125,224,.2); color: #9fd0ff;
+	font-family: inherit; font-size: 11px; font-weight: 800; padding: 6px 9px; border-radius: 7px;
+}
+.mdl .cars button:disabled { background: rgba(255,255,255,.06); color: #6b7686; }
+.mdl.locked { opacity: .45; }
 
 /* ===== シート ===== */
 #sheet, #logSheet {

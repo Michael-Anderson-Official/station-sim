@@ -44,6 +44,7 @@
 <div id="alert"></div>
 
 <button id="buildBtn">🏗 増築</button>
+<button id="diaBtn">🕒 ダイヤ</button>
 <button id="logBtn">📋 日報</button>
 
 <section id="sheet" hidden>
@@ -54,6 +55,39 @@
 	<div id="upgrades"></div>
 	<p class="hint">ボトルネックは「階段」「改札」「線路」。どこが詰まっているかは駅を見れば分かります。</p>
 	<button id="resetBtn">はじめから（セーブ削除）</button>
+</section>
+
+<section id="diaSheet" hidden>
+	<div class="sheetHead">
+		<h2>ダイヤ</h2>
+		<div id="diaStat"></div>
+		<button id="diaClose">✕</button>
+	</div>
+	<div class="seg">
+		<button data-tab="dia" class="on">ダイヤ</button>
+		<button data-tab="fleet">契約</button>
+	</div>
+
+	<div id="diaPane">
+		<div id="diaZoom">
+			<button data-span="30">30分</button>
+			<button data-span="60" class="on">1時間</button>
+			<button data-span="180">3時間</button>
+			<button data-span="1440">全日</button>
+			<span id="diaClock"></span>
+		</div>
+		<canvas id="diaCv"></canvas>
+		<p class="hint" id="diaHint">帯を横にドラッグすると、そのパターン全体がずれます。何も無い所をドラッグすると時刻が動きます。</p>
+		<div id="diaList"></div>
+		<button id="diaAdd">＋ パターンを追加</button>
+		<div id="diaIssues"></div>
+	</div>
+
+	<div id="fleetPane" hidden>
+		<div id="fleetHave"></div>
+		<h3 class="sub">契約できる形式</h3>
+		<div id="fleetShop"></div>
+	</div>
 </section>
 
 <section id="logSheet" hidden>

@@ -1549,7 +1549,9 @@ function compileSched() {
 	R.depIdx.sort((a, b) => a.dep - b.dep);
 
 	R.issues = issues;
+	R.allSlots = out;          // 無効なものも含む(UIで赤表示するため)
 	R.trackBusy = new Array(Math.max(1, S.nTrack)).fill(0);
+	if (DIA.open) drawDia();
 }
 
 // この先しばらくの間に、その番線から乗れるスジがあるか
@@ -2285,6 +2287,412 @@ function resetRuntimeForLayout() {
 	compileSched();
 }
 
+/* ================= ダイヤ編集UI =================
+   番線別のタイムライン。帯は展開されたスジ、編集の実体はパターン(S.dia) */
+const DIA = {
+	open: false, tab: 'dia', sel: null,
+	t0: 5 * 60 - 4 * 60,     // 表示開始(4:00起点の分)
+	span: 60,                // 表示幅(分)
+	cv: null, ctx: null, w: 0, h: 0, dpr: 1,
+	drag: null, dirty: false,
+};
+const LANE_H = 26, AXIS_H = 22, LABEL_W = 30;
+
+function diaLaneCount() { return Math.max(1, S.nTrack); }
+function diaHeight() { return AXIS_H + diaLaneCount() * LANE_H + 6; }
+
+function diaResize() {
+	const cv = DIA.cv;
+	if (!cv) return;
+	DIA.dpr = Math.min(window.devicePixelRatio || 1, 2);
+	// レイアウトが取れない状況(非表示など)でも 0 幅にしない
+	DIA.w = Math.max(240, cv.clientWidth || window.innerWidth - 24 || 360);
+	DIA.h = diaHeight();
+	cv.style.height = DIA.h + 'px';
+	cv.width = Math.round(DIA.w * DIA.dpr);
+	cv.height = Math.round(DIA.h * DIA.dpr);
+	DIA.ctx.setTransform(DIA.dpr, 0, 0, DIA.dpr, 0, 0);
+}
+
+function minToX(mn) { return LABEL_W + (mn - DIA.t0) / DIA.span * (DIA.w - LABEL_W); }
+function xToMin(x) { return DIA.t0 + (x - LABEL_W) / (DIA.w - LABEL_W) * DIA.span; }
+
+// 4:00起点の分 → 時計表示
+function clockOf(mn) {
+	const h = Math.floor(((mn + 4 * 60) / 60)) % 24, m = Math.round(mn) % 60;
+	return String(h).padStart(2, '0') + ':' + String((m + 60) % 60).padStart(2, '0');
+}
+
+function drawDia() {
+	if (!DIA.ctx || !DIA.w) return;
+	const g = DIA.ctx, w = DIA.w, h = DIA.h;
+	g.clearRect(0, 0, w, h);
+
+	// 需要カーブを背景に敷く
+	g.fillStyle = 'rgba(120,170,230,.10)';
+	g.beginPath(); g.moveTo(LABEL_W, AXIS_H);
+	for (let x = LABEL_W; x <= w; x += 4) {
+		const mn = xToMin(x), hh = ((mn + 4 * 60) / 60) % 24;
+		const a = HOURLY[Math.floor(hh) % 24], b = HOURLY[(Math.floor(hh) + 1) % 24];
+		const v = a + (b - a) * (hh - Math.floor(hh));
+		g.lineTo(x, AXIS_H + (h - AXIS_H) * (1 - Math.min(1, v / 3.2)));
+	}
+	g.lineTo(w, AXIS_H); g.closePath(); g.fill();
+
+	// 時刻の目盛り
+	const step = DIA.span > 600 ? 120 : DIA.span > 180 ? 60 : DIA.span > 90 ? 30 : 10;
+	g.font = '9px system-ui, sans-serif'; g.textBaseline = 'middle';
+	for (let mn = Math.ceil(DIA.t0 / step) * step; mn <= DIA.t0 + DIA.span; mn += step) {
+		const x = minToX(mn);
+		g.strokeStyle = (mn + 240) % 60 === 0 ? 'rgba(255,255,255,.18)' : 'rgba(255,255,255,.07)';
+		g.beginPath(); g.moveTo(x, AXIS_H - 4); g.lineTo(x, h); g.stroke();
+		g.fillStyle = 'rgba(220,232,246,.65)'; g.textAlign = 'center';
+		g.fillText(clockOf(mn), x, 9);
+	}
+
+	// 番線のレーン
+	for (let t = 0; t < diaLaneCount(); t++) {
+		const y = AXIS_H + t * LANE_H;
+		g.fillStyle = t % 2 ? 'rgba(255,255,255,.035)' : 'rgba(255,255,255,.015)';
+		g.fillRect(LABEL_W, y, w - LABEL_W, LANE_H);
+		g.fillStyle = 'rgba(220,232,246,.8)'; g.textAlign = 'left'; g.font = 'bold 10px system-ui, sans-serif';
+		g.fillText((t + 1) + '番', 3, y + LANE_H / 2);
+	}
+
+	// スジの帯
+	const slots = R.allSlots || [];
+	for (const s of slots) {
+		const a = s.arr / 60, d = s.dep / 60;
+		if (d < DIA.t0 - 5 || a > DIA.t0 + DIA.span + 5) continue;
+		if (s.track >= diaLaneCount()) continue;
+		const x0 = minToX(a), x1 = Math.max(minToX(d), x0 + 9);
+		const y = AXIS_H + s.track * LANE_H + 4;
+		const T = TYPES[s.ty];
+		const on = DIA.sel === s.dia;
+		g.fillStyle = s.ok ? '#' + T.col.toString(16).padStart(6, '0') : '#7a2f2a';
+		g.beginPath();
+		if (g.roundRect) g.roundRect(x0, y, x1 - x0, LANE_H - 8, 3); else g.rect(x0, y, x1 - x0, LANE_H - 8);
+		g.fill();
+		if (on) { g.strokeStyle = '#fff'; g.lineWidth = 1.5; g.stroke(); }
+		if (x1 - x0 > 16) {
+			g.fillStyle = 'rgba(16,22,29,.9)'; g.textAlign = 'center'; g.font = 'bold 9px system-ui, sans-serif';
+			g.fillText(T.abbr, (x0 + x1) / 2, y + (LANE_H - 8) / 2);
+		}
+	}
+
+	// 現在時刻
+	const nowMn = S.t / 60;
+	if (nowMn >= DIA.t0 && nowMn <= DIA.t0 + DIA.span) {
+		const x = minToX(nowMn);
+		g.strokeStyle = '#7ee0a0'; g.lineWidth = 1.5;
+		g.beginPath(); g.moveTo(x, AXIS_H - 4); g.lineTo(x, h); g.stroke();
+	}
+	const el = document.getElementById('diaClock');
+	if (el) el.textContent = clockOf(DIA.t0) + ' 〜 ' + clockOf(DIA.t0 + DIA.span);
+}
+
+// 指の位置にあるスジ
+function diaHit(x, y) {
+	const slots = R.allSlots || [];
+	for (const s of slots) {
+		if (s.track >= diaLaneCount()) continue;
+		const x0 = minToX(s.arr / 60), x1 = Math.max(minToX(s.dep / 60), x0 + 9);
+		const yy = AXIS_H + s.track * LANE_H;
+		if (x >= x0 - 5 && x <= x1 + 5 && y >= yy && y <= yy + LANE_H) return s;
+	}
+	return null;
+}
+
+function diaCompileSoon() {
+	DIA.dirty = true;
+	if (DIA.timer) return;
+	DIA.timer = setTimeout(() => { DIA.timer = null; DIA.dirty = false; compileSched(); renderDiaList(); }, 120);
+}
+
+function initDiaCanvas() {
+	const cv = DIA.cv = document.getElementById('diaCv');
+	DIA.ctx = cv.getContext('2d');
+	let last = null;
+
+	cv.addEventListener('pointerdown', e => {
+		cv.setPointerCapture(e.pointerId);
+		const r = cv.getBoundingClientRect();
+		const x = e.clientX - r.left, y = e.clientY - r.top;
+		const hit = diaHit(x, y);
+		last = { x: x, y: y, mn: xToMin(x) };
+		if (hit) {
+			DIA.sel = hit.dia;
+			const d = S.dia.find(p => p.id === hit.dia);
+			DIA.drag = d ? { pat: d, off0: d.off || 0, mn0: xToMin(x) } : null;
+			renderDiaList();
+		} else {
+			DIA.drag = null;
+		}
+		drawDia();
+	});
+
+	cv.addEventListener('pointermove', e => {
+		if (!last) return;
+		const r = cv.getBoundingClientRect();
+		const x = e.clientX - r.left;
+		if (DIA.drag) {
+			// パターン全体をずらす
+			const d = DIA.drag.pat;
+			const delta = Math.round(xToMin(x) - DIA.drag.mn0);
+			const ev = Math.max(1, d.every);
+			d.off = ((DIA.drag.off0 + delta) % ev + ev) % ev;
+			diaCompileSoon();
+			drawDia();
+		} else {
+			// 時刻を動かす
+			DIA.t0 -= (x - last.x) / (DIA.w - LABEL_W) * DIA.span;
+			DIA.t0 = Math.max(0, Math.min(1440 - DIA.span, DIA.t0));
+			last.x = x;
+			drawDia();
+		}
+	});
+
+	const end = () => { last = null; if (DIA.drag) { DIA.drag = null; compileSched(); renderDiaList(); } };
+	cv.addEventListener('pointerup', end);
+	cv.addEventListener('pointercancel', end);
+}
+
+/* ---- パターン一覧とインスペクタ ---- */
+function patLabel(d) {
+	const m = modelOf(d.m);
+	return m.name + ' ' + d.cars + '両';
+}
+function patSub(d) {
+	return (d.track + 1) + '番線 / ' + clockOf(d.from) + '〜' + clockOf(d.to)
+		+ ' / ' + d.every + '分毎 / 停車' + d.dwell + '秒';
+}
+
+function renderDiaList() {
+	const el = document.getElementById('diaList');
+	if (!el) return;
+	el.innerHTML = '';
+	const badIds = {};
+	for (const it of R.issues) badIds[it.dia] = true;
+
+	for (const d of S.dia) {
+		const row = document.createElement('div');
+		row.className = 'diaRow' + (DIA.sel === d.id ? ' sel' : '') + (badIds[d.id] ? ' bad' : '');
+		const T = TYPES[d.ty];
+		row.innerHTML =
+			'<span class="ty" style="background:#' + T.col.toString(16).padStart(6, '0') + '">' + T.abbr + '</span>' +
+			'<span class="tx"><b>' + patLabel(d) + '</b><span>' + patSub(d) + '</span></span>';
+		const del = document.createElement('button');
+		del.className = 'del'; del.textContent = '✕';
+		del.onclick = ev => {
+			ev.stopPropagation();
+			S.dia = S.dia.filter(x => x.id !== d.id);
+			if (DIA.sel === d.id) DIA.sel = null;
+			compileSched(); renderDiaList(); drawDia(); save();
+		};
+		row.appendChild(del);
+		row.onclick = () => { DIA.sel = DIA.sel === d.id ? null : d.id; renderDiaList(); drawDia(); };
+		el.appendChild(row);
+
+		if (DIA.sel === d.id) el.appendChild(buildInspector(d));
+	}
+	if (!S.dia.length) {
+		el.innerHTML = '<p class="hint">パターンがありません。まず「契約」タブで編成を契約してから、下の＋で追加してください。</p>';
+	}
+	renderDiaStat();
+}
+
+// step は増減の刻み。丸め幅より小さいと押しても値が戻ってしまうので必ず合わせる
+function stepper(label, get, set, fmt, step) {
+	const st = step || 1;
+	const row = document.createElement('div');
+	row.className = 'stepRow';
+	row.innerHTML = '<span>' + label + '</span>';
+	const mk = (t, dv) => {
+		const b = document.createElement('button');
+		b.textContent = t;
+		b.onclick = () => { set(get() + dv); compileSched(); renderDiaList(); drawDia(); save(); };
+		return b;
+	};
+	row.appendChild(mk('−', -st));
+	const v = document.createElement('span');
+	v.className = 'val'; v.textContent = fmt(get());
+	row.appendChild(v);
+	row.appendChild(mk('＋', st));
+	return row;
+}
+
+function buildInspector(d) {
+	const box = document.createElement('div');
+	box.style.cssText = 'background:rgba(0,0,0,.22);border-radius:9px;padding:8px 9px;margin:-2px 0 8px;';
+
+	// 種別
+	const tyRow = document.createElement('div');
+	tyRow.className = 'stepRow';
+	tyRow.innerHTML = '<span>種別</span>';
+	for (const T of TYPES) {
+		const b = document.createElement('button');
+		b.className = 'wide';
+		b.textContent = T.name;
+		b.style.background = d.ty === T.id ? '#' + T.col.toString(16).padStart(6, '0') : 'rgba(255,255,255,.1)';
+		b.style.color = d.ty === T.id ? '#10161d' : '#e8eef7';
+		if (S.rank < T.rank) { b.disabled = true; b.style.opacity = '.4'; b.textContent = T.name + '(未解禁)'; }
+		b.onclick = () => { d.ty = T.id; compileSched(); renderDiaList(); drawDia(); save(); };
+		tyRow.appendChild(b);
+	}
+	box.appendChild(tyRow);
+
+	box.appendChild(stepper('番線', () => d.track,
+		v => { d.track = Math.max(0, Math.min(S.nTrack - 1, v)); }, v => (v + 1) + '番線'));
+	box.appendChild(stepper('間隔', () => d.every,
+		v => { d.every = Math.max(2, Math.min(240, v)); }, v => v + '分毎'));
+	box.appendChild(stepper('ずらし', () => d.off || 0,
+		v => { const e = Math.max(1, d.every); d.off = ((v % e) + e) % e; }, v => v + '分'));
+	box.appendChild(stepper('停車', () => d.dwell,
+		v => { d.dwell = Math.max(15, Math.min(300, Math.round(v / 5) * 5)); }, v => v + '秒', 5));
+	box.appendChild(stepper('開始', () => d.from,
+		v => { d.from = Math.max(0, Math.min(d.to - 30, Math.round(v / 30) * 30)); }, clockOf, 30));
+	box.appendChild(stepper('終了', () => d.to,
+		v => { d.to = Math.max(d.from + 30, Math.min(1440, Math.round(v / 30) * 30)); }, clockOf, 30));
+
+	// 停車時間で捌ける人数
+	const cap = slotCap(d.m, d.cars), flow = slotFlow(d.m, d.cars);
+	const room = Math.round(cap * CFG.LOAD_ROOM);
+	const canBoard = Math.round(flow * d.dwell);
+	const info = document.createElement('p');
+	info.className = 'hint';
+	info.style.margin = '6px 2px 0';
+	info.textContent = '定員' + cap + '人 / ドア扱い' + flow.toFixed(1) + '人・秒。'
+		+ '停車' + d.dwell + '秒なら最大' + canBoard + '人を捌けるが、'
+		+ '空き容量は約' + room + '人（降車が多いほど増える）。';
+	box.appendChild(info);
+	return box;
+}
+
+function renderDiaStat() {
+	const el = document.getElementById('diaStat');
+	if (!el) return;
+	el.innerHTML = '本日 <b>' + R.sched.length + '本</b><br>'
+		+ '所要' + R.need + ' / 契約' + R.have
+		+ (R.short > 0 ? ' <i>' + R.short + '本不足</i>' : '');
+	const is = document.getElementById('diaIssues');
+	if (is) {
+		const seen = {}, lines = [];
+		for (const it of R.issues) {
+			if (seen[it.msg]) { seen[it.msg]++; continue; }
+			seen[it.msg] = 1; lines.push(it.msg);
+			if (lines.length >= 4) break;
+		}
+		is.innerHTML = lines.map(m => '<div>⚠ ' + m + (seen[m] > 1 ? '（' + seen[m] + '件）' : '') + '</div>').join('');
+	}
+}
+
+/* ---- 契約タブ ---- */
+function renderFleet() {
+	const have = document.getElementById('fleetHave');
+	const shop = document.getElementById('fleetShop');
+	if (!have || !shop) return;
+
+	have.innerHTML = S.fleet.length
+		? S.fleet.map(f => {
+			const m = modelOf(f.m);
+			return '<div class="mdl"><div class="h"><b>' + m.name + ' ' + f.cars + '両</b>'
+				+ '<span>×' + f.n + '本</span><i>リース ' + yen(contractLease(f.m, f.cars) * f.n) + '/日</i></div></div>';
+		}).join('')
+		: '<p class="hint">まだ1本も契約していません。下から契約すると、ダイヤに置けるようになります。</p>';
+
+	shop.innerHTML = '';
+	for (const m of MODELS) {
+		const locked = S.rank < m.rank;
+		const div = document.createElement('div');
+		div.className = 'mdl' + (locked ? ' locked' : '');
+		div.innerHTML = '<div class="h"><b>' + m.name + '</b><span>定員' + m.cap + '人/両・'
+			+ m.kmh + 'km/h・' + m.fit.map(t => TYPES[t].name).join('/') + '</span>'
+			+ '<i>' + (locked ? RANKS[m.rank].name + 'から' : yen(m.price) + '/両') + '</i></div>';
+		const cars = document.createElement('div');
+		cars.className = 'cars';
+		for (const c of m.cars) {
+			const b = document.createElement('button');
+			const price = contractPrice(m.id, c);
+			b.textContent = c + '両 ' + yen(price);
+			b.disabled = locked || c > S.cars || S.money < price;
+			if (c > S.cars) b.textContent = c + '両 (ホーム' + S.cars + '両)';
+			b.onclick = () => {
+				if (S.money < price) return;
+				S.money -= price;
+				const f = S.fleet.find(x => x.m === m.id && x.cars === c);
+				if (f) f.n++; else S.fleet.push({ m: m.id, cars: c, n: 1 });
+				compileSched(); renderFleet(); renderDiaList(); save();
+			};
+			cars.appendChild(b);
+		}
+		div.appendChild(cars);
+		shop.appendChild(div);
+	}
+}
+
+/* ---- 開閉 ---- */
+function openDia() {
+	DIA.open = true;
+	document.getElementById('diaSheet').hidden = false;
+	DIA.savedSpeed = R.speed;
+	R.speed = 0;                       // 編集中は時間を止める
+	document.querySelectorAll('#speed button').forEach(x => x.classList.toggle('active', +x.dataset.speed === 0));
+	if (!DIA.cv) initDiaCanvas();
+	diaResize();
+	renderDiaList(); renderFleet(); drawDia();
+}
+function closeDia() {
+	DIA.open = false;
+	document.getElementById('diaSheet').hidden = true;
+	if (DIA.savedSpeed !== undefined) {
+		R.speed = DIA.savedSpeed;
+		document.querySelectorAll('#speed button').forEach(x => x.classList.toggle('active', +x.dataset.speed === R.speed));
+	}
+	compileSched(); save();
+}
+
+function initDiaUI() {
+	document.getElementById('diaBtn').onclick = openDia;
+	document.getElementById('diaClose').onclick = closeDia;
+
+	document.querySelectorAll('#diaSheet .seg button').forEach(b => {
+		b.onclick = () => {
+			DIA.tab = b.dataset.tab;
+			document.querySelectorAll('#diaSheet .seg button').forEach(x => x.classList.toggle('on', x === b));
+			document.getElementById('diaPane').hidden = DIA.tab !== 'dia';
+			document.getElementById('fleetPane').hidden = DIA.tab !== 'fleet';
+			if (DIA.tab === 'dia') { diaResize(); drawDia(); } else renderFleet();
+		};
+	});
+
+	document.querySelectorAll('#diaZoom button').forEach(b => {
+		b.onclick = () => {
+			const c = DIA.t0 + DIA.span / 2;
+			DIA.span = +b.dataset.span;
+			DIA.t0 = Math.max(0, Math.min(1440 - DIA.span, c - DIA.span / 2));
+			document.querySelectorAll('#diaZoom button').forEach(x => x.classList.toggle('on', x === b));
+			drawDia();
+		};
+	});
+
+	document.getElementById('diaAdd').onclick = () => {
+		if (!S.fleet.length) {
+			alertOnce('nofleet', '先に「契約」タブで編成を契約してください', false, 5);
+			return;
+		}
+		const f = S.fleet[0];
+		const d = {
+			id: S.diaId++, m: f.m, cars: f.cars, ty: 0,
+			track: 0, from: 60, to: 20 * 60, every: 30, off: 0, dwell: 45,
+		};
+		S.dia.push(d);
+		DIA.sel = d.id;
+		compileSched(); renderDiaList(); drawDia(); save();
+	};
+
+	window.addEventListener('resize', () => { if (DIA.open) { diaResize(); drawDia(); } });
+}
+
 /* ================= UI ================= */
 function yen(v) {
 	if (v >= 1e8) return '¥' + (v / 1e8).toFixed(2) + '億';
@@ -2309,6 +2717,8 @@ function initUI() {
 	const sheet = document.getElementById('sheet');
 	document.getElementById('buildBtn').onclick = () => { renderUpgrades(); sheet.hidden = false; };
 	document.getElementById('sheetClose').onclick = () => { sheet.hidden = true; };
+
+	initDiaUI();
 
 	const logSheet = document.getElementById('logSheet');
 	document.getElementById('logBtn').onclick = () => { renderLog(); logSheet.hidden = false; };
@@ -2538,6 +2948,8 @@ function boot() {
 			return { id: d.id, slots: R.sched.length, need: R.need, short: R.short, issues: R.issues.slice(0, 4) };
 		},
 		dia: () => ({ fleet: S.fleet, dia: S.dia, slots: R.sched.length, need: R.need, have: R.have, short: R.short, issues: R.issues.slice(0, 6) }),
+		ui: DIA,
+		minToX: minToX, xToMin: xToMin,
 		step: sec => {
 			for (let r = sec; r > 0; r -= 30) simulate(Math.min(30, r));
 			renderPax(); uiTick = 1; updateUI(0);
