@@ -54,6 +54,8 @@ const CFG = {
 	MAX_PAX_DETAIL: 6000,  // 詳細モードの上限(iPhone 17 Pro 前提)
 	QUEUE_PITCH: 0.55,     // 行列の1人あたりの間隔(m)
 	MAX_STAIRS: 6,
+	STUCK_EVICT: 45,       // 歩行中に動けない状態がこれだけ続いた客は追い出す(ゲーム秒)
+	STUCK_SPD: 0.01,       // 「動けていない」とみなす速さ(m/s)
 	MAX_SUB_DT: 0.5,       // 物理サブステップ上限(ゲーム秒)
 	DWELL_MIN: 25,         // 最低停車時間
 	DWELL_MAX: 180,
@@ -168,20 +170,29 @@ function fillRect(l, x0, x1, z0, z1, type) {
 	}
 }
 
-// 設備を置く。占有セルに種別とIDを書く
+// 動線そのものになる設備。あとから置くものに潰させない
+function isFlowFac(t) { return t === C_GATE || t === C_STAIR || t === C_ESCAL; }
+
+/* 設備を置く。占有セルに種別とIDを書く。
+   改札・階段は乗客の動線そのものなので、あとから置く店や自販機に上書きさせない。
+   ここを素通しにすると、盤面から改札が消えて乗客が無賃で通り抜ける */
 function placeFac(kind, l, x, z, w, d, cell, meta) {
 	const id = B.nextId++;
 	// meta は設備番号(階段 kk / 改札 jj)。B.o はあとから置いた設備に奪われるので、
 	// セル→設備の逆引きは必ずこのレコードから作る
-	B.objs.set(id, Object.assign({ i: id, k: kind, l: l, x: x, z: z, w: w, d: d }, meta));
+	let wrote = 0;
 	for (let i = 0; i < w; i++) {
 		for (let j = 0; j < d; j++) {
 			if (!inBoard(x + i, z + j)) continue;
 			const k = gidx(l, x + i, z + j);
+			if (!isFlowFac(cell) && isFlowFac(B.t[k])) continue;   // 動線は守る
 			B.t[k] = cell;
 			B.o[k] = id;
+			wrote++;
 		}
 	}
+	if (!wrote) return -1;
+	B.objs.set(id, Object.assign({ i: id, k: kind, l: l, x: x, z: z, w: w, d: d }, meta));
 	return id;
 }
 
@@ -229,7 +240,8 @@ function gridFromParams() {
 		fx0 = allX1 + 2;
 		fx1 = fx0 + Math.max(6, Math.ceil(gateCount() * 1.2) + 4);
 		fz0 = pz1 + 2;
-		fz1 = fz0 + Math.max(7, Math.ceil(gateCount() * 0.6) + 6);
+		// 店を出すと駅舎そのものが奥行きを増す。改札の帯の手前に店の場所が要る
+		fz1 = fz0 + Math.max(7, Math.ceil(gateCount() * 0.6) + 6) + (S.shops ? 5 : 0);
 	}
 	fx1 = Math.min(GRID.W - 2, fx1); fz1 = Math.min(GRID.D - 3, fz1);
 	fillRect(LU, fx0, fx1, fz0, fz1, C_FLOOR);
@@ -272,16 +284,25 @@ function gridFromParams() {
 			{ jj: j });                        // R.gateFree[j] と対応づける
 	}
 
-	// 駅ナカコンビニ(3×4 = 6×8m = 48m²。NewDaysの平均と一致)と自販機
+	/* 駅ナカコンビニ(3×4 = 6×8m = 48m²。NewDaysの平均と一致)と自販機。
+	   改札の帯を必ず避ける。ここを避けないと店が改札のセルを上書きし、
+	   改札が盤面から消えて乗客が通り抜けてしまう(地平駅では4個中3個が消えていた) */
+	const gRows = Math.max(1, Math.ceil(total / cols));
+	const gzTop = total ? gz - (gRows - 1) * 2 : gz;     // いちばん奥の改札行
+	// 奥(精算済側)に4マス取れれば駅ナカ、無理なら手前(改札外)へ回す
+	let sz = gzTop - 5;
+	if (total && sz < fz0 + 1) sz = gz + 2;
+	if (!total) sz = fz0 + 1;
 	for (let s = 0; s < S.shops; s++) {
 		const side = s % 2, idx = Math.floor(s / 2);
 		const sx = side ? fx1 - 3 - idx * 4 : fx0 + 1 + idx * 4;
-		const sz = Math.max(fz0 + 1, gz - 6);
-		if (sx > fx0 && sx + 2 < fx1 && sz + 3 <= fz1) placeFac('conv', LU, sx, sz, 3, 4, C_SHOP);
+		if (sx > fx0 && sx + 2 < fx1 && sz > fz0 && sz + 3 <= fz1) placeFac('conv', LU, sx, sz, 3, 4, C_SHOP);
 	}
+	// 自販機は店とぶつからない列に寄せる
+	const vx = S.shops ? fx1 - 1 : fx0 + 1;
 	for (let i = 0; i < Math.min(6, 1 + total / 8); i++) {
 		const vz = Math.min(fz1 - 1, gz + 2 + i);
-		if (vz > fz0 && vz < fz1) placeFac('vend', LU, fx0 + 1, vz, 1, 1, C_VEND);
+		if (vz > fz0 && vz < fz1 && vx > fx0 && vx < fx1) placeFac('vend', LU, vx, vz, 1, 1, C_VEND);
 	}
 
 	rebuildDerived();
@@ -328,11 +349,20 @@ const WK = {
 	solidShop: true,   // 店舗/自販機を通行不可にするか。動線が切れたら自動で false
 	shopFallback: false,
 	tiOk: true,        // DV.tracks の ti と パラメトリックの番線番号が一致しているか
-	anchor: false,     // アンカーを盤面へ寄せるか(C3)
-	on: false,         // stepField で歩かせるか(C5)
-	audit: { on: false, n: 0, offGraph: 0, gap: [], cos: [], legOver: 0 },
+	anchor: true,      // ノードの目標座標を盤面のセルへ寄せるか
+	on: true,          // 距離場に沿って歩かせるか(false なら従来どおり直線)
+	audit: { on: false, n: 0, offGraph: 0, gap: [], cos: [], legEnd: [], legOver: 0, by: {} },
 	stat: { rebuildMs: 0, evicted: 0, fallback: 0, stale: 0, dropped: 0 },
 };
+
+/* 種付き乱数。既定では Math.random そのままなので挙動は変わらない。
+   sim.seed(n) を入れたときだけ線形合同法に差し替わり、A/B比較が成立する */
+let _wkR = null;
+function wkRnd() {
+	if (_wkR === null) return Math.random();
+	_wkR = (_wkR * 1664525 + 1013904223) % 4294967296;
+	return _wkR / 4294967296;
+}
 
 // 3Dでは中身の詰まった箱として描かれるので、店舗と自販機は通行不可にする
 function wkSolid(t) { return WK.solidShop && (t === C_SHOP || t === C_VEND); }
@@ -1067,6 +1097,7 @@ const R = {
 	inQ: [], inQHead: 0,  // 駅に入りきらない入場客(到着時刻のFIFO)
 	waitN: [1], waitW: [0], maxWaitW: 1,   // 線路ごとの待機客(全走査を避けるためのカウンタ)
 	crossFree: [0], crossOpenAt: 0, crossClosed: false,   // 構内踏切
+	resN: { stair: 0, gate: 0, cross: 0 },   // res の取得回数(Stage3の検証用)
 	sched: [],            // 検証済みスジ(spawn昇順)。これが実行の唯一の真実
 	depIdx: [],           // 発車昇順・2日ぶんの索引(番線選択と入場判定に使う)
 	schedCur: 0,          // 次に投入するスジ
@@ -2544,7 +2575,9 @@ function updateTrains(dt) {
 function newPax() {
 	return { x: 0, y: 0, z: 0, path: null, pi: 0, dir: 0, plat: 0, track: 0,
 		state: 'walk', until: 0, born: 0, readyAt: undefined, w: 1, sx: 0, sz: 0,
-		ph: 0, head: 0, col: COL_OUT };
+		ph: 0, head: 0, col: COL_OUT,
+		// Stage3: wkVer=経路を焼いた盤面版数 / jt=横のばらつき / stuckT=詰まり監視 / fx,fz=影
+		wkVer: -1, jt: 0, stuckT: 0, fx: 0, fz: 0 };
 }
 
 function pathOut(p) {
@@ -2572,19 +2605,19 @@ function pathOut(p) {
 	// 出口。地下は階段を上がって地上へ出る
 	if (isUnder()) {
 		path.push({ x: G.concX1 + 20, y: G.entryY, z: G.exitZ });
-		path.push({ x: G.concX1 + 40 + Math.random() * 10, y: 0, z: G.exitZ + (Math.random() - 0.5) * 12, exit: true });
+		path.push({ x: G.concX1 + 40 + wkRnd() * 10, y: 0, z: G.exitZ + (wkRnd() - 0.5) * 12, exit: true });
 	} else {
 		// 駅舎の幅の内側に収める(線路の上に湧かないように)
-		const ex = G.concX0 + 2 + Math.random() * Math.max(1, (G.concX1 - G.concX0) - 4);
+		const ex = G.concX0 + 2 + wkRnd() * Math.max(1, (G.concX1 - G.concX0) - 4);
 		path.push({ x: ex, y: G.entryY, z: G.exitZ + 12, exit: true });
 	}
-	return path;
+	return attachFields(p, path);
 }
 
 function pathIn(p) {
 	const px = platX(p.plat);
 	const side = trackSide(p.track);
-	const di = Math.floor(Math.random() * G.nDoors);
+	const di = Math.floor(wkRnd() * G.nDoors);
 	const path = [];
 	// 地下は階段を下りてコンコースへ
 	if (isUnder()) path.push({ x: G.concX1 + 20, y: G.entryY, z: G.exitZ });
@@ -2605,7 +2638,7 @@ function pathIn(p) {
 		path.push({ x: px, y: CFG.PLAT_Y, z: G.platZ1 - 3 });
 	}
 	path.push({ x: px + side * (S.platW / 2 - 1.3), y: CFG.PLAT_Y, z: doorZ(di), board: true });
-	return path;
+	return attachFields(p, path);
 }
 
 function pickStair(plat) {
@@ -2633,13 +2666,15 @@ function addPax(dir, plat, track, x, y, z, born) {
 	p.x = x; p.y = y; p.z = z;
 	p.w = R.paxScale;                 // 生成時のスケールを保持する
 	p.born = born === undefined ? R.now : born;
-	p.ph = Math.random() * 6.283;
+	p.ph = wkRnd() * 6.283;
 	p.head = dir === 0 ? 0 : Math.PI;
-	p.spd = 0.78 + Math.random() * 0.44;   // 歩く速さの個人差
+	p.spd = 0.78 + wkRnd() * 0.44;   // 歩く速さの個人差
 	// 優等が走っているときだけ「速い列車を待つ」客が現れる
-	p.pref = (dir === 1 && R.hasFast && Math.random() < CFG.FAST_SHARE) ? 1 : 0;
+	p.pref = (dir === 1 && R.hasFast && wkRnd() < CFG.FAST_SHARE) ? 1 : 0;
 	const pal = dir === 0 ? PAL_OUT : PAL_IN;
-	p.col = pal[(Math.random() * pal.length) | 0];
+	p.col = pal[(wkRnd() * pal.length) | 0];
+	p.jt = (wkRnd() - 0.5) * 0.7;
+	p.fx = p.x; p.fz = p.z;
 	p.path = dir === 0 ? pathOut(p) : pathIn(p);
 	p.pi = 0;
 	R.pax.push(p);
@@ -2652,7 +2687,7 @@ function spawnAlighted(tr, n) {
 	const side = trackSide(tr.track);
 	while (R.alightAcc >= 1) {
 		R.alightAcc -= 1;
-		const di = Math.floor(Math.random() * G.nDoors);
+		const di = Math.floor(wkRnd() * G.nDoors);
 		addPax(0, plat, tr.track,
 			platX(plat) + side * (S.platW / 2 - 1.0),
 			CFG.PLAT_Y, doorZ(di));
@@ -2826,6 +2861,7 @@ function updatePax(dt) {
 			const open = node.res === 'cross' ? R.crossOpenAt : 0;
 			const start = Math.max(pool[idx], R.now, open);
 			pool[idx] = start + hw;
+			R.resN[node.res] = (R.resN[node.res] || 0) + 1;   // Stage3の検証用
 			p.gotRes = true;
 			p.until = start;
 			// 自分の前に何人いるか。詳細モードでは実際にその人数ぶん後ろに並ぶ
@@ -2847,7 +2883,10 @@ function updatePax(dt) {
 			if (start > R.now) { p.state = 'queue'; continue; }
 		}
 
-		const arrived = stepTo(p, node.x, node.y, node.z, dt, node.climb);
+		if (WK.audit.on) auditStep(p, node, dt);   // 影を1歩進めて記録するだけ。本体は触らない
+		const ox = p.x, oz = p.z;
+		const arrived = WK.on ? stepField(p, node, dt)
+			: stepTo(p, node.x, node.y, node.z, dt, node.climb);
 		if (arrived) {
 			p.gotRes = false;
 			if (node.exit) { finishPax(p); R.pax.splice(i, 1); continue; }
@@ -2863,8 +2902,29 @@ function updatePax(dt) {
 				if (p.w > R.maxWaitW) R.maxWaitW = p.w;
 				continue;
 			}
+			// 影が「場だけで」アンカーまで来られたか。これが距離場の可否を決める指標。
+			// 勾配とアンカー方向の角度(cos)は、場が集団までしか案内しない設計上
+			// 負になって当たり前なので、到達したかどうかで見る
+			if (WK.audit.on && node.fid !== undefined && node.fid >= 0) {
+				WK.audit.legEnd.push(Math.hypot(p.fx - node.x, p.fz - node.z));
+				if (WK.audit.legEnd.length > 30000) WK.audit.legEnd.shift();
+			}
 			p.pi++;
+			p.stuckT = 0;                       // ノードが進んだので詰まり時間を戻す
+			p.fx = p.x; p.fz = p.z;             // 影は脚の境界で同期する
 			if (p.pi >= p.path.length) { finishPax(p); R.pax.splice(i, 1); }
+		} else {
+			/* 詰まり監視。動けない歩行客は paxLimit() を食い潰し、新規入場を止めて
+			   「入場規制」を偽装する。経路のバグが別の症状に化けるのを防ぐ最後の網。
+			   混雑減速の下限でも 0.23m/s は出るので、0.01m/s は 23 倍の余裕がある。
+			   行列待ちと列車待ちは上で continue するので対象外(正当な待ちを追い出さない) */
+			const lim = CFG.STUCK_SPD * dt;
+			const mv = (p.x - ox) * (p.x - ox) + (p.z - oz) * (p.z - oz);
+			p.stuckT = mv < lim * lim ? p.stuckT + dt : 0;
+			if (p.stuckT > CFG.STUCK_EVICT) {
+				WK.stat.evicted++;
+				finishPax(p); R.pax.splice(i, 1);   // 満足度は課す(45秒立ち往生は実際に悪い体験)
+			}
 		}
 	}
 }
@@ -2889,6 +2949,175 @@ function stepTo(p, tx, ty, tz, dt, climb) {
 		p.y += dy * (move / d);
 	}
 	return false;
+}
+
+/* ================= Stage3: 距離場で歩く =================
+   ノード列そのものは一切変えない。変えるのは「隣り合うノードのあいだの歩き方」だけ。
+   res(階段/改札/踏切)の予約は今までどおりノードが駆動するので、待ち行列は不変 */
+
+/* 経路に距離場の番号とレイヤーを焼き込む。ノードを足しも消しも並べ替えもしない。
+   高さの変わる脚(階段の昇降・地平のスロープ・地下の昇り)は必ず場を使わない —
+   ここを場に任せると CFG.STAIR_CLIMB の意味が変わる */
+function attachFields(p, path) {
+	let prevY = p.y;                     // 生成直後の高さ = 第1脚の始点
+	const onCross = z => !hasLink() && WK.crossZ >= 0 && cz(z) === WK.crossZ;
+	for (let i = 0; i < path.length; i++) {
+		const n = path[i];
+		n.fid = -1;
+		n.lay = (hasLink() && Math.abs(n.y - G.entryY) < 1.5) ? 1 : 0;
+
+		// アンカーを盤面のセルへ寄せる(C3)。既定では動かさない
+		if (WK.anchor) wkReanchor(p, path, i);
+
+		// 場の割り当て。案内するのは「アンカーの集団」までで、端から端までは張らない。
+		// 端から端まで張ると改札を迂回できてしまい、待ち行列が消える
+		let fid = -1;
+		if (n.res === 'gate') {
+			const row = WK.gateRow[n.j];
+			if (row >= 0) fid = (p.dir === 0 ? WK.fGP : WK.fGU)[row];
+			if (fid === undefined) fid = -1;
+		} else if (n.res === 'stair') {
+			fid = p.dir === 0 ? -1 : WK.fSTAIR[p.plat];   // 出場はホーム上=見通しがきく
+			if (fid === undefined) fid = -1;
+		} else if (n.res === 'cross') {
+			fid = p.dir === 0 ? -1 : WK.fCROSS_U;         // 出場側はスロープ脚なのでどのみち落ちる
+		} else if (n.exit) {
+			fid = WK.fEXIT;
+		} else if (!n.board && onCross(n.z)) {
+			// 踏切帯の上に落ちる中継ノード。出場は駅舎side、入場はホームsideへ渡る
+			fid = p.dir === 0 ? WK.fCROSS_U : WK.fCROSS_P;
+		}
+
+		if (fid >= 0 && prevY === n.y && !n.climb) n.fid = fid;
+		prevY = n.y;
+	}
+	p.wkVer = WK.ver;
+	return path;
+}
+
+/* アンカー(ノードの目標座標)を盤面のセルへ寄せる。
+   パラメトリックな platX/gatePos/stairZ と盤面のレイアウトは別々に決まっていて、
+   新宿級では 100m 以上ずれる。距離場は盤面の上で定義されているので、
+   アンカーが盤面から外れていると場と目標が食い違い、乗客が迷う */
+function wkReanchor(p, path, i) {
+	const n = path[i], nx = path[i + 1];
+	if (n.res === 'gate') {
+		// 出場は精算済側(-Z)から入り、入場は改札外側(+Z)から入る
+		const a = wkAnchorGate(n.j, p.dir === 0);
+		if (a) { n.x = a.x; n.z = a.z; }
+		const b = wkAnchorGate(n.j, p.dir !== 0);
+		if (b && nx && !nx.res) { nx.x = b.x; nx.z = b.z + (p.dir === 0 ? 2 : -2); }
+	} else if (n.res === 'stair') {
+		// 出場はホーム口(+Z端)から入って上へ、入場はコンコース口(-Z端)から入って下へ
+		const a = wkAnchorStair(p.plat, n.k, p.dir !== 0);
+		if (a) { n.x = a.x; n.z = a.z; }
+		const b = wkAnchorStair(p.plat, n.k, p.dir === 0);
+		if (b && nx && nx.climb) { nx.x = b.x; nx.z = b.z; }
+	} else if (n.res === 'cross') {
+		const a = wkAnchorCross(p.dir === 0 ? 'plat' : 'conc');
+		if (a) { n.x = a.x; n.z = a.z; }
+		// 渡りきった先も盤面へ
+		const b = wkAnchorCross(p.dir === 0 ? 'conc' : 'plat');
+		if (b && nx && !nx.res && !nx.board) { nx.x = b.x; nx.z = b.z; }
+	} else if (n.board) {
+		const a = wkAnchorBoard(p.plat, p.track, n.z);
+		n.x = a.x; n.z = a.z;
+	} else if (n.exit && WK.entRect) {
+		// 出口の最終点は意図的に盤外(構造の外へ歩き去る)。x だけ出口の帯に収める
+		n.x = Math.min(Math.max(n.x, wx(WK.entRect.x0)), wx(WK.entRect.x1));
+	} else if (nx && nx.exit && WK.entRect && !n.res) {
+		// 出口の1つ手前の中継点は帯の中に置く(地下の昇り口など)
+		n.x = wx(Math.round((WK.entRect.x0 + WK.entRect.x1) / 2));
+		n.z = wz(Math.round((WK.entRect.z0 + WK.entRect.z1) / 2));
+	}
+}
+
+/* 距離場に沿って1歩ぶん歩かせる。戻り値は stepTo と同じ「node に着いたか」。
+   使えない状況では必ず現行の stepTo に落ちる */
+function stepField(p, node, dt) {
+	if (node.climb || node.fid === undefined || node.fid < 0)
+		return stepTo(p, node.x, node.y, node.z, dt, node.climb);
+	if (p.wkVer !== WK.ver) { WK.stat.stale++; return stepTo(p, node.x, node.y, node.z, dt, node.climb); }
+	const k = wkCellOf(node.lay, p.x, p.z);
+	const g = wkSample(node.fid, k);
+	if (!g.ok) { WK.stat.fallback++; return stepTo(p, node.x, node.y, node.z, dt, node.climb); }
+
+	const dx = node.x - p.x, dz = node.z - p.z;
+	const dRest = Math.hypot(dx, dz);
+	const spd = CFG.WALK * crowdFactor(p) * (p.spd || 1);
+	const move = spd * dt;
+	if (dRest <= move || dRest < 0.05) {          // 到達判定は stepTo と同一
+		p.x = node.x; p.y = node.y; p.z = node.z;
+		return true;
+	}
+	let ux, uz;
+	if (g.at) { ux = dx / dRest; uz = dz / dRest; }   // 根の上 → アンカーへ直線
+	else {
+		// 横のばらつき。全員が同じ折れ線に重なるのを防ぐ。アンカーは動かさないので
+		// 到達判定にも行列の位置にも影響しない
+		const jx = -g.z * p.jt, jz = g.x * p.jt;
+		const nx = g.x + jx, nz = g.z + jz, m = Math.hypot(nx, nz) || 1;
+		ux = nx / m; uz = nz / m;
+	}
+	p.x += ux * move; p.z += uz * move;
+	p.head = Math.atan2(ux, uz);
+	// 高さは「アンカーまでの残り水平距離」に比例して詰める。
+	// 勾配の1歩(2m)で割ると階段まわりで y が一気に飛ぶ
+	const dy = node.y - p.y;
+	if (Math.abs(dy) > 0.001) p.y += dy * Math.min(1, move / dRest);
+	return false;
+}
+
+/* 影エージェント。距離場だけで動く2つ目の位置を並走させ、本体との差を測る。
+   予約もしないし到達判定もしないので、ゲームには一切影響しない */
+function auditStep(p, node, dt) {
+	const a = WK.audit;
+	a.n++;
+	if (node.climb || node.fid === undefined || node.fid < 0) { p.fx = p.x; p.fz = p.z; return; }
+	const k = wkCellOf(node.lay, p.fx, p.fz);
+	const g = wkSample(node.fid, k);
+	if (k < 0 || !g.ok) { a.offGraph++; p.fx = p.x; p.fz = p.z; return; }
+	const dx = node.x - p.fx, dz = node.z - p.fz;
+	const dRest = Math.hypot(dx, dz);
+	const move = CFG.WALK * crowdFactor(p) * (p.spd || 1) * dt;
+	let ux, uz;
+	if (g.at || dRest < 0.05) { ux = dRest ? dx / dRest : 0; uz = dRest ? dz / dRest : 0; }
+	else { ux = g.x; uz = g.z; }
+	p.fx += ux * move; p.fz += uz * move;
+	if (a.gap.length < 30000) a.gap.push(Math.hypot(p.fx - p.x, p.fz - p.z));
+	if (!g.at && dRest > 1) {
+		const c = (g.x * dx + g.z * dz) / dRest;
+		if (a.cos.length < 30000) a.cos.push(c);
+		// 脚の種類ごとの内訳。どの脚で場とアンカーが食い違うかを切り分ける
+		const key = (node.res || (node.exit ? 'exit' : node.board ? 'board' : 'mid')) + '/' + p.dir;
+		const b = a.by[key] || (a.by[key] = { n: 0, sum: 0, neg: 0, min: 1 });
+		b.n++; b.sum += c; if (c < 0) b.neg++; if (c < b.min) b.min = c;
+	}
+}
+
+function wkPct(arr, q) {
+	if (!arr.length) return 0;
+	const a = arr.slice().sort((x, y) => x - y);
+	return +a[Math.min(a.length - 1, Math.floor(a.length * q))].toFixed(3);
+}
+
+function auditReport() {
+	const a = WK.audit;
+	return {
+		n: a.n, offGraph: a.offGraph,
+		onGraph: a.n ? +(1 - a.offGraph / a.n).toFixed(4) : 1,
+		gapMed: wkPct(a.gap, 0.5), gapP95: wkPct(a.gap, 0.95), gapMax: wkPct(a.gap, 1),
+		cosMed: wkPct(a.cos, 0.5), cosP05: wkPct(a.cos, 0.05), cosMin: wkPct(a.cos, 0),
+		cosNeg: a.cos.filter(c => c < 0).length,
+		// 脚の終わりに影がアンカーからどれだけ離れているか。これが小さければ場は正しい
+		legMed: wkPct(a.legEnd, 0.5), legP95: wkPct(a.legEnd, 0.95), legMax: wkPct(a.legEnd, 1),
+		legN: a.legEnd.length, legBad: a.legEnd.filter(v => v > 6).length,
+		by: Object.keys(a.by).sort().map(k => k + ' n=' + a.by[k].n
+			+ ' 平均cos=' + (a.by[k].sum / a.by[k].n).toFixed(3)
+			+ ' 逆向き=' + a.by[k].neg + ' 最小=' + a.by[k].min.toFixed(2)),
+		samples: { gap: a.gap.length, cos: a.cos.length },
+		stale: WK.stat.stale, fallback: WK.stat.fallback, evicted: WK.stat.evicted,
+	};
 }
 
 /* ================= 需要 ================= */
@@ -2963,9 +3192,9 @@ function updateDemand(dt) {
 		if (track < 0) break;
 		const p = isUnder()
 			? addPax(1, trackPlat(track), track,
-				G.concX1 + 40 + Math.random() * 10, 0, G.exitZ + (Math.random() - 0.5) * 12, R.inQ[R.inQHead])
+				G.concX1 + 40 + wkRnd() * 10, 0, G.exitZ + (wkRnd() - 0.5) * 12, R.inQ[R.inQHead])
 			: addPax(1, trackPlat(track), track,
-				G.concX0 + 2 + Math.random() * Math.max(1, (G.concX1 - G.concX0) - 4),
+				G.concX0 + 2 + wkRnd() * Math.max(1, (G.concX1 - G.concX0) - 4),
 				G.entryY, G.exitZ + 12, R.inQ[R.inQHead]);
 		if (!p) break;
 		R.inQHead++;
@@ -4299,6 +4528,22 @@ function boot() {
 		// 歩行グラフ(Stage3)。乗客を1人も動かさずに盤面の健全性を測る
 		walkStats: () => walkStats(),
 		walkSweep: () => walkSweep(),
+		// アンカーを盤面のセルへ寄せるか(C3)
+		anchor: on => { WK.anchor = on !== false; resetRuntimeForLayout(); buildStation(); return WK.anchor; },
+		// 距離場で歩かせるか(C5)
+		useField: on => { WK.on = on !== false; return WK.on; },
+		// 種付き乱数。同じ種なら同じ客列になるので、歩き方の違いだけを比べられる
+		seed: n => { _wkR = (n === undefined || n === null) ? null : ((n >>> 0) || 1); return _wkR; },
+		// 影エージェント: 距離場だけで動く2つ目の位置を並走させて本体と比べる
+		audit: on => {
+			WK.audit.on = on !== false;
+			WK.audit.gap = []; WK.audit.cos = []; WK.audit.n = 0;
+			WK.audit.offGraph = 0; WK.audit.legOver = 0; WK.audit.by = {}; WK.audit.legEnd = [];
+			WK.stat.stale = 0; WK.stat.fallback = 0; WK.stat.evicted = 0;
+			return WK.audit.on;
+		},
+		auditReport: () => auditReport(),
+		resN: () => Object.assign({}, R.resN),
 		gridStats: () => gridStats(),
 		step: sec => {
 			for (let r = sec; r > 0; r -= 30) simulate(Math.min(30, r));
