@@ -429,7 +429,8 @@ function gridFromParams() {
 	facSync();        // 自動レイアウト → S.fac(Stage4 でプレイヤーの配置に置き換える)
 	facPlaceAll();
 	rebuildDerived();
-	buildWalkGraph();      // Stage3: 盤面から歩行グラフと距離場を起こす(無効化点はここだけ)
+	buildWalkGraph();
+	facRebindRuntime();   // 待ち行列を永続IDで引き継ぐ      // Stage3: 盤面から歩行グラフと距離場を起こす(無効化点はここだけ)
 }
 
 /* ---- 盤面から派生値を作る。recalcGeometry() のグリッド版 ----
@@ -464,8 +465,8 @@ const WK = {
 	fSTAIR: [],        // ホーム面 → 階段列(コンコース側)の場id
 	fCROSS_P: -1, fCROSS_U: -1,
 	// 逆引き表。B.o は後から置いた設備に奪われるので必ず B.objs から作る
-	gateCell: null, gateMouth: null, gateRow: null,
-	stairTop: null, stairBot: null,
+	gateFid: [], facCell: null, facMouth: null, facKind: null,
+	stairEnds: null, stairOf: null, gateRowOf: null,
 	platRect: [], boardX: null, entRect: null,
 	crossZ: -1, crossX0: -1, crossX1: -1,
 	probe: null,       // 連結判定の作業配列(使い回す)
@@ -562,24 +563,38 @@ function wkIndexBoard() {
    B.o はあとから置いた設備に上書きされる(店1個で改札のセルが化ける)ので使わない。
    名前は kk/jj/plat にする。o.k は種別の文字列で、3D生成がそれで分岐している */
 function wkIndexFacs() {
-	const LU = hasLink() ? 1 : 0, MS = CFG.MAX_STAIRS, ng = gateCount();
-	WK.gateCell = new Int32Array(Math.max(1, ng)).fill(-1);
-	WK.gateMouth = new Int32Array(Math.max(2, ng * 2)).fill(-1);
-	WK.gateRow = new Int32Array(Math.max(1, ng)).fill(-1);
-	WK.stairTop = new Int32Array(Math.max(1, S.nPlat * MS)).fill(-1);
-	WK.stairBot = new Int32Array(Math.max(1, S.nPlat * MS)).fill(-1);
+	const LU = hasLink() ? 1 : 0;
+	WK.gateFid = [];                 // 盤面にある改札の fid(z降順→x昇順)
+	WK.facCell = new Map();          // fid → 代表セル
+	WK.facMouth = new Map();         // fid → [精算済側(-Z), 改札外側(+Z)]
+	WK.stairEnds = new Map();        // fid → [ホーム口(+Z端), コンコース口(-Z端)]
+	WK.stairOf = new Map();          // ホーム面 → その面の階段の fid 一覧
+	WK.gateRowOf = new Map();        // fid → 改札の行番号
+	WK.facKind = new Map();          // fid → 種別の文字列
 	for (const o of B.objs.values()) {
-		if (o.jj !== undefined && o.jj < ng) {
-			WK.gateCell[o.jj] = gidx(o.l, o.x, o.z);
-			WK.gateMouth[o.jj * 2 + 0] = gidx(o.l, o.x, o.z - 1);   // 精算済側(-Z)
-			WK.gateMouth[o.jj * 2 + 1] = gidx(o.l, o.x, o.z + 1);   // 改札外側(+Z)
-		}
-		if (o.plat !== undefined && o.kk !== undefined && o.plat < S.nPlat && o.kk < MS) {
-			const t = o.plat * MS + o.kk;
-			WK.stairBot[t] = gidx(0, o.x, o.z + o.d - 1);           // +Z端 = ホーム口
-			WK.stairTop[t] = gidx(LU, o.x, o.z);                    // -Z端 = コンコース口
+		WK.facKind.set(o.i, o.k);
+		if (o.k === 'gateA' || o.k === 'gateM') {
+			WK.gateFid.push(o.i);
+			WK.facCell.set(o.i, gidx(o.l, o.x, o.z));
+			WK.facMouth.set(o.i, [gidx(o.l, o.x, o.z - 1), gidx(o.l, o.x, o.z + 1)]);
+		} else if (o.k === 'stair' || o.k === 'escal') {
+			WK.facCell.set(o.i, gidx(0, o.x, o.z));
+			WK.stairEnds.set(o.i, [gidx(0, o.x, o.z + o.d - 1), gidx(LU, o.x, o.z)]);
+			const a = WK.stairOf.get(o.plat) || []; a.push(o.i); WK.stairOf.set(o.plat, a);
 		}
 	}
+	// 改札は「改札外側から数えた行」の順に並べる
+	WK.gateFid.sort((a, b) => (WK.facCell.get(b) % GRID.D) - (WK.facCell.get(a) % GRID.D) || a - b);
+}
+
+// 設備1台の処理間隔(秒)
+function facHeadway(fid) {
+	const k = WK.facKind.get(fid);
+	if (k === 'gateM') return CFG.GATE_M_HEADWAY;
+	if (k === 'gateA') return CFG.GATE_A_HEADWAY;
+	if (k === 'escal') return CFG.ESC_HEADWAY;
+	if (k === 'stair') return CFG.STAIR_HEADWAY;
+	return CFG.CROSS_HEADWAY;
 }
 
 /* ---- 通行マスクを焼く ----
@@ -719,10 +734,9 @@ function wkStairRoots(plat, LU) {
    paid=true なら精算済側(-Z)、false なら改札外側(+Z) */
 function wkGateRoots(gz, paid) {
 	const out = [];
-	for (let j = 0; j < WK.gateCell.length; j++) {
-		const c = WK.gateCell[j];
-		if (c < 0 || c % GRID.D !== gz) continue;
-		const k = WK.gateMouth[j * 2 + (paid ? 0 : 1)];
+	for (const fid of WK.gateFid) {
+		if (WK.facCell.get(fid) % GRID.D !== gz) continue;
+		const k = WK.facMouth.get(fid)[paid ? 0 : 1];
 		if (k >= 0 && (WK.pass[k] & WK_PASS)) out.push(k);
 	}
 	out.sort((a, b) => a - b);
@@ -737,9 +751,8 @@ function wkBuildFields() {
 	// 改札。行ごとに 精算済側(-Z) と 改札外側(+Z) の隣接行を根にする
 	WK.fGP.length = 0; WK.fGU.length = 0;
 	const rows = new Map();
-	for (let j = 0; j < WK.gateCell.length; j++) {
-		const c = WK.gateCell[j];
-		if (c < 0) continue;
+	for (const fid of WK.gateFid) {
+		const c = WK.facCell.get(fid);
 		const LW = GRID.W * GRID.D, l = c >= LW ? 1 : 0, rr = c - l * LW;
 		const gx = (rr / GRID.D) | 0, gz = rr - gx * GRID.D;
 		const r = rows.get(gz) || { x0: gx, x1: gx };
@@ -754,8 +767,8 @@ function wkBuildFields() {
 		void g;
 		WK.fGP[r] = wkAddField('GP' + r, wkGateRoots(gz, true), GRID.D);
 		WK.fGU[r] = wkAddField('GU' + r, wkGateRoots(gz, false), GRID.D);
-		for (let j = 0; j < WK.gateCell.length; j++) {
-			if (WK.gateCell[j] >= 0 && WK.gateCell[j] % GRID.D === gz) WK.gateRow[j] = r;
+		for (const fid of WK.gateFid) {
+			if (WK.facCell.get(fid) % GRID.D === gz) WK.gateRowOf.set(fid, r);
 		}
 	});
 
@@ -824,10 +837,10 @@ function wkRunGaps() {
 }
 
 function wkPortalPairs() {
-	const out = [], MS = CFG.MAX_STAIRS, LW = GRID.W * GRID.D;
-	for (let plat = 0; plat < S.nPlat; plat++) for (let kk = 0; kk < MS; kk++) {
-		const t = plat * MS + kk, bot = WK.stairBot[t], top = WK.stairTop[t];
-		if (bot < 0 && top < 0) continue;
+	const out = [], LW = GRID.W * GRID.D;
+	for (const [fid, e] of (WK.stairEnds || new Map())) {
+		const bot = e[0], top = e[1];
+		const plat = 0, kk = fid;
 		const botPass = bot >= 0 && !!(WK.pass[bot] & WK_PASS);
 		const topPass = top >= 0 && !!(WK.pass[top] & WK_PASS);
 		// 上端の真下(または真上)にポータルが立っているか
@@ -838,28 +851,28 @@ function wkPortalPairs() {
 	return out;
 }
 
+// 置いてあるのに盤面へ焼けなかった設備の数
 function wkStairMissing() {
-	const MS = CFG.MAX_STAIRS;
-	let n = 0;
-	for (let plat = 0; plat < S.nPlat; plat++) for (let kk = 0; kk < S.stairs; kk++) {
-		if (WK.stairBot[plat * MS + kk] < 0) n++;
-	}
-	return n;
+	let want = 0;
+	for (const r of S.fac) if (r.k === K_STAIR || r.k === K_ESCAL) want++;
+	return Math.max(0, want - (WK.stairEnds ? WK.stairEnds.size : 0));
 }
 
 // パラメトリック座標と盤面座標のずれ。C3で座標がどれだけ動くかを事前に知る
 function wkAnchorDrift() {
 	const d = [];
-	for (let j = 0; j < gateCount(); j++) {
-		const a = wkAnchorGate(j, true);
-		if (!a) continue;
+	(WK.gateFid || []).forEach((fid, j) => {
+		const a = wkAnchorGate(fid, true);
+		if (!a) return;
 		const g = gatePos(j);
 		d.push(Math.hypot(a.x - g.x, a.z - g.z));
-	}
-	for (let plat = 0; plat < S.nPlat; plat++) for (let k = 0; k < S.stairs; k++) {
-		const a = wkAnchorStair(plat, k, false);
-		if (!a) continue;
-		d.push(Math.hypot(a.x - platX(plat), a.z - (stairZ(k) + 2)));
+	});
+	for (let plat = 0; plat < S.nPlat; plat++) {
+		(WK.stairOf && WK.stairOf.get(plat) || []).forEach((fid, k) => {
+			const a = wkAnchorStair(fid, false);
+			if (!a) return;
+			d.push(Math.hypot(a.x - platX(plat), a.z - (stairZ(k) + 2)));
+		});
 	}
 	if (!d.length) return { p50: 0, p95: 0, max: 0, n: 0 };
 	d.sort((a, b) => a - b);
@@ -877,19 +890,20 @@ function wkKeyToXZ(k) {
 }
 
 // 改札の口。paid=true なら精算済側(-Z)、false なら改札外側(+Z)
-function wkAnchorGate(j, paid) {
-	if (!WK.gateMouth || j < 0 || j * 2 + 1 >= WK.gateMouth.length) return null;
-	const k = WK.gateMouth[j * 2 + (paid ? 0 : 1)];
+function wkAnchorGate(fid, paid) {
+	const m = WK.facMouth && WK.facMouth.get(fid);
+	if (!m) return null;
+	const k = m[paid ? 0 : 1];
 	if (k < 0 || !(WK.pass[k] & WK_PASS)) return null;
 	const p = wkKeyToXZ(k);
 	return { x: p.x, z: p.z };
 }
 
 // 階段の口。top=true ならコンコース側(-Z端)、false ならホーム側(+Z端)
-function wkAnchorStair(plat, k, top) {
-	const MS = CFG.MAX_STAIRS, t = plat * MS + k;
-	if (!WK.stairTop || t < 0 || t >= WK.stairTop.length) return null;
-	const key = top ? WK.stairTop[t] : WK.stairBot[t];
+function wkAnchorStair(fid, top) {
+	const e = WK.stairEnds && WK.stairEnds.get(fid);
+	if (!e) return null;
+	const key = top ? e[1] : e[0];
 	if (key < 0 || !(WK.pass[key] & WK_PASS)) return null;
 	const p = wkKeyToXZ(key);
 	return { x: p.x, z: p.z };
@@ -941,7 +955,8 @@ function walkStats() {
 	return {
 		walk: walk, port: port, fields: fs, platUnreach: platUnreach,
 		runGap: wkRunGaps(), portalPairs: wkPortalPairs(),
-		gateMissing: Array.prototype.filter.call(WK.gateCell, (c, j) => c < 0 && j < gateCount()).length,
+		gateMissing: (() => { let w = 0; for (const r of S.fac) if (r.k === K_GATEA || r.k === K_GATEM) w++;
+			return Math.max(0, w - (WK.gateFid ? WK.gateFid.length : 0)); })(),
 		stairMissing: wkStairMissing(), boardOnRail: boardOnRail, tiOk: WK.tiOk,
 		anchorDrift: wkAnchorDrift(), shopFallback: WK.shopFallback,
 		dropped: WK.stat.dropped, rebuildMs: +WK.stat.rebuildMs.toFixed(2),
@@ -1277,8 +1292,7 @@ const R = {
 	need: 0, short: 0,    // 所要編成数 / 不足数
 	issues: [],           // ダイヤの問題(UIで赤表示)
 	missAcc: [],          // [番線×2+志向] ごとの積み残し発生本数(満足度計算用)
-	stairFree: [],        // [plat][k] 階段が空く時刻
-	gateFree: [],         // 改札レーンが空く時刻
+	facFree: new Float64Array(64),   // レーンごとに空く時刻(索引は FACR.lane が配る slot)
 	platCount: [],        // ホーム上の人数(混雑計算用)
 	concCount: 0,
 	satSum: 0, satN: 0,
@@ -2758,20 +2772,20 @@ function pathOut(p) {
 	const path = [];
 	if (hasStairs()) {
 		const k = pickStair(p.plat);
-		const sz = stairZ(k);
-		path.push({ x: px, y: CFG.PLAT_Y, z: sz + 2, res: 'stair', k: k });
+		const sz = stairZ(WK.stairOf && WK.stairOf.get(p.plat) ? WK.stairOf.get(p.plat).indexOf(k) : 0);
+		path.push({ x: px, y: CFG.PLAT_Y, z: sz + 2, res: 'stair', rf: k, hw: facHeadway(k) });
 		path.push({ x: px, y: G.entryY, z: sz - 10, climb: true });
 	} else {
 		// 地平駅はホーム端のスロープを下り、構内踏切を渡って駅舎へ
 		path.push({ x: px, y: CFG.PLAT_Y, z: G.platZ1 - 3 });
-		path.push({ x: px, y: 0, z: G.crossZ, res: 'cross', qz: -1 });
+		path.push({ x: px, y: 0, z: G.crossZ, res: 'cross', rf: 0, hw: CFG.CROSS_HEADWAY, qz: -1 });
 		path.push({ x: G.concX0 + 2, y: 0, z: G.crossZ });
 	}
 	// 改札が1つも無い無人駅では素通りする
 	const j = pickGate();
 	if (j >= 0) {
-		const g = gatePos(j);
-		path.push({ x: g.x, y: G.entryY, z: g.z - 4, res: 'gate', j: j });
+		const g = gatePos(WK.gateFid ? WK.gateFid.indexOf(j) : 0);
+		path.push({ x: g.x, y: G.entryY, z: g.z - 4, res: 'gate', rf: j, hw: facHeadway(j) });
 		path.push({ x: g.x, y: G.entryY, z: g.z + 4 });
 	}
 	// 出口。地下は階段を上がって地上へ出る
@@ -2795,17 +2809,17 @@ function pathIn(p) {
 	if (isUnder()) path.push({ x: G.concX1 + 20, y: G.entryY, z: G.exitZ });
 	const j = pickGate();
 	if (j >= 0) {
-		const g = gatePos(j);
-		path.push({ x: g.x, y: G.entryY, z: g.z + 6, res: 'gate', j: j });
+		const g = gatePos(WK.gateFid ? WK.gateFid.indexOf(j) : 0);
+		path.push({ x: g.x, y: G.entryY, z: g.z + 6, res: 'gate', rf: j, hw: facHeadway(j) });
 		path.push({ x: g.x, y: G.entryY, z: g.z - 6 });
 	}
 	if (hasStairs()) {
 		const k = pickStair(p.plat);
-		const sz = stairZ(k);
-		path.push({ x: px, y: G.entryY, z: sz - 10, res: 'stair', k: k });
+		const sz = stairZ(WK.stairOf && WK.stairOf.get(p.plat) ? WK.stairOf.get(p.plat).indexOf(k) : 0);
+		path.push({ x: px, y: G.entryY, z: sz - 10, res: 'stair', rf: k, hw: facHeadway(k) });
 		path.push({ x: px, y: CFG.PLAT_Y, z: sz + 2, climb: true });
 	} else {
-		path.push({ x: G.concX0 + 2, y: 0, z: G.crossZ, res: 'cross', qx: 1 });
+		path.push({ x: G.concX0 + 2, y: 0, z: G.crossZ, res: 'cross', rf: 0, hw: CFG.CROSS_HEADWAY, qx: 1 });
 		path.push({ x: px, y: 0, z: G.crossZ });
 		path.push({ x: px, y: CFG.PLAT_Y, z: G.platZ1 - 3 });
 	}
@@ -2813,20 +2827,56 @@ function pathIn(p) {
 	return attachFields(p, path);
 }
 
+/* ---- 設備のレーン ----
+   待ち行列の時刻は「設備の永続ID」に紐づく。番号で索引していたころは、
+   改札を1台撤去すると後続の番号が全部ずれて別の改札の行列が移り、
+   増築のたびに全レーンがゼロに戻って朝ラッシュの行列が消えていた */
+const FACR = { lane: new Map(), freeSlots: [], nSlot: 0 };
+
+function laneOf(fid) { const v = FACR.lane.get(fid); return v === undefined ? -1 : v; }
+
+function facRebindRuntime() {
+	const live = new Set([0]);                    // 0番は構内踏切の予約席
+	for (const fid of (WK.gateFid || [])) live.add(fid);
+	for (const fid of (WK.stairEnds || new Map()).keys()) live.add(fid);
+	// 消えた設備のレーンを返す。他のレーンは1つも動かない
+	for (const [fid, slot] of FACR.lane) {
+		if (live.has(fid)) continue;
+		FACR.lane.delete(fid); FACR.freeSlots.push(slot);
+		R.facFree[slot] = 0;
+	}
+	// 新しい設備にレーンを配る
+	for (const fid of live) {
+		if (FACR.lane.has(fid)) continue;
+		const slot = FACR.freeSlots.length ? FACR.freeSlots.pop() : FACR.nSlot++;
+		if (slot >= R.facFree.length) {
+			const a = new Float64Array(R.facFree.length * 2); a.set(R.facFree); R.facFree = a;
+		}
+		R.facFree[slot] = R.now;                  // 新設は「いま空いている」
+		FACR.lane.set(fid, slot);
+	}
+}
+
+// その面でいちばん早く捌ける階段。返すのは永続ID
 function pickStair(plat) {
-	let best = 0, bt = Infinity;
-	for (let k = 0; k < S.stairs; k++) {
-		const f = R.stairFree[plat][k];
-		if (f < bt) { bt = f; best = k; }
+	const list = (WK.stairOf && WK.stairOf.get(plat)) || [];
+	let best = -1, bt = Infinity;
+	for (const fid of list) {
+		const slot = laneOf(fid);
+		if (slot < 0) continue;
+		const eta = Math.max(R.facFree[slot], R.now) + facHeadway(fid);
+		if (eta < bt) { bt = eta; best = fid; }
 	}
 	return best;
 }
+// いちばん早く通れる改札。待ち時間だけでなく処理の速さも見る(自動改札に寄る)
 function pickGate() {
 	let best = -1, bt = Infinity;
-	for (let j = 0; j < gateCount(); j++) {
-		// 待ち時間だけでなく処理の速さも見て、自動改札に寄るようにする
-		const eta = Math.max(R.gateFree[j], R.now) + gateHeadway(j);
-		if (eta < bt) { bt = eta; best = j; }
+	for (const fid of (WK.gateFid || [])) {
+		const slot = laneOf(fid);
+		if (slot < 0) continue;
+		const eta = Math.max(R.facFree[slot], R.now) + facHeadway(fid);
+		if (eta < bt) { bt = eta; best = fid; }
 	}
 	return best;
 }
@@ -3017,17 +3067,11 @@ function updatePax(dt) {
 
 		// リソース(階段/改札/構内踏切)の取得
 		if (node.res && !p.gotRes) {
-			let pool, idx, hw;
-			if (node.res === 'stair') {
-				pool = R.stairFree[p.plat]; idx = node.k;
-				hw = S.esc ? CFG.ESC_HEADWAY : CFG.STAIR_HEADWAY;
-			} else if (node.res === 'cross') {
-				pool = R.crossFree; idx = 0;
-				hw = CFG.CROSS_HEADWAY;
-			} else {
-				pool = R.gateFree; idx = node.j;
-				hw = gateHeadway(node.j);
-			}
+			// 種別で分岐せず、経路に焼かれた設備の永続IDからレーンを引く
+			const idx = laneOf(node.rf);
+			if (idx < 0) { p.path = null; p.pi = 0; R.pax.splice(i, 1); continue; }
+			const pool = R.facFree;
+			let hw = node.hw;
 			// 1エージェントが paxScale 人を表すので、占有時間もその分かかる
 			hw *= R.paxScale;
 			// 構内踏切は列車が抜けるまで開かない
@@ -3148,8 +3192,8 @@ function attachFields(p, path) {
 		// 端から端まで張ると改札を迂回できてしまい、待ち行列が消える
 		let fid = -1;
 		if (n.res === 'gate') {
-			const row = WK.gateRow[n.j];
-			if (row >= 0) fid = (p.dir === 0 ? WK.fGP : WK.fGU)[row];
+			const row = WK.gateRowOf ? WK.gateRowOf.get(n.rf) : undefined;
+			if (row !== undefined && row >= 0) fid = (p.dir === 0 ? WK.fGP : WK.fGU)[row];
 			if (fid === undefined) fid = -1;
 		} else if (n.res === 'stair') {
 			fid = p.dir === 0 ? -1 : WK.fSTAIR[p.plat];   // 出場はホーム上=見通しがきく
@@ -3178,15 +3222,15 @@ function wkReanchor(p, path, i) {
 	const n = path[i], nx = path[i + 1];
 	if (n.res === 'gate') {
 		// 出場は精算済側(-Z)から入り、入場は改札外側(+Z)から入る
-		const a = wkAnchorGate(n.j, p.dir === 0);
+		const a = wkAnchorGate(n.rf, p.dir === 0);
 		if (a) { n.x = a.x; n.z = a.z; }
-		const b = wkAnchorGate(n.j, p.dir !== 0);
+		const b = wkAnchorGate(n.rf, p.dir !== 0);
 		if (b && nx && !nx.res) { nx.x = b.x; nx.z = b.z + (p.dir === 0 ? 2 : -2); }
 	} else if (n.res === 'stair') {
 		// 出場はホーム口(+Z端)から入って上へ、入場はコンコース口(-Z端)から入って下へ
-		const a = wkAnchorStair(p.plat, n.k, p.dir !== 0);
+		const a = wkAnchorStair(n.rf, p.dir !== 0);
 		if (a) { n.x = a.x; n.z = a.z; }
-		const b = wkAnchorStair(p.plat, n.k, p.dir === 0);
+		const b = wkAnchorStair(n.rf, p.dir === 0);
 		if (b && nx && nx.climb) { nx.x = b.x; nx.z = b.z; }
 	} else if (n.res === 'cross') {
 		const a = wkAnchorCross(p.dir === 0 ? 'plat' : 'conc');
@@ -3746,11 +3790,6 @@ function resetRuntimeForLayout() {
 	// 盤面と歩行グラフを先に起こす。下の経路再生成が距離場の番号を焼き込むので、
 	// 順序が逆だと古い盤面の場を掴む
 	try { gridFromParams(); } catch (e) { console.error('grid', e); }
-	R.stairFree = [];
-	for (let i = 0; i < S.nPlat; i++) {
-		R.stairFree.push(new Array(CFG.MAX_STAIRS).fill(0));
-	}
-	R.gateFree = new Array(gateCount()).fill(0);
 	R.platCount = new Array(S.nPlat).fill(0);
 	R.waitN = new Array(Math.max(1, S.nTrack)).fill(0);
 	R.waitW = new Array(Math.max(1, S.nTrack)).fill(0);
@@ -3770,7 +3809,6 @@ function resetRuntimeForLayout() {
 	for (const tr of R.trains) if (tr.mesh) trainGroup.remove(tr.mesh);
 	R.trains.length = 0;
 	R.missAcc = new Array(Math.max(1, S.nTrack) * 2).fill(0);
-	R.crossFree = [0];       // 階段・改札と揃える。踏切だけ取り残されていた
 	recountWaiting();
 	compileSched();
 }
@@ -4546,15 +4584,15 @@ function updateUI(rdt) {
 
 	// 詰まりの警告
 	if (waiting > 900) alertOnce('crowd', '⚠ ホームが大混雑 — 線路/ホームが足りません', false, 30);
-	const gq = R.gateFree.length ? Math.max.apply(null, R.gateFree) - R.now : 0;
+	const wait = fid => { const sl = laneOf(fid); return sl < 0 ? 0 : R.facFree[sl] - R.now; };
+	let gq = 0;
+	for (const fid of (WK.gateFid || [])) gq = Math.max(gq, wait(fid));
 	if (gq > 90) alertOnce('gate', '⚠ 改札に長い行列 — 改札を増設', false, 30);
-	if (gateCount() === 0) {
+	if (!WK.gateFid || !WK.gateFid.length) {
 		alertOnce('nogate', '⚠ 改札が無く運賃を取りこぼしています', false, 90);
 	}
 	let sq = 0;
-	for (let i = 0; i < R.stairFree.length; i++) {
-		for (let k = 0; k < S.stairs; k++) sq = Math.max(sq, R.stairFree[i][k] - R.now);
-	}
+	for (const fid of (WK.stairEnds || new Map()).keys()) sq = Math.max(sq, wait(fid));
 	if (sq > 90) alertOnce('stair', '⚠ 階段が渋滞 — 階段/エスカレーターを検討', false, 30);
 	if (S.money < 0) alertOnce('debt', '⚠ 赤字です', false, 60);
 }
@@ -4719,6 +4757,17 @@ function boot() {
 		walkStats: () => walkStats(),
 		walkSweep: () => walkSweep(),
 		boardHash: () => boardHash(),
+		// 検証用: 全レーンの予約を捨てる(R.now を巻き戻す計測でだけ使う)
+		clearQueues: () => { R.facFree.fill(R.now); return FACR.lane.size; },
+		// 設備ごとの待ち時間(秒)。増築を挟んでも連続しているべき
+		queues: () => {
+			const o = { gate: [], stair: [], cross: 0 };
+			for (const fid of (WK.gateFid || [])) { const sl = laneOf(fid); o.gate.push(sl < 0 ? -1 : +(R.facFree[sl] - R.now).toFixed(1)); }
+			for (const fid of (WK.stairEnds || new Map()).keys()) { const sl = laneOf(fid); o.stair.push(sl < 0 ? -1 : +(R.facFree[sl] - R.now).toFixed(1)); }
+			const c = laneOf(0); o.cross = c < 0 ? -1 : +(R.facFree[c] - R.now).toFixed(1);
+			o.slots = FACR.nSlot; o.free = FACR.freeSlots.length;
+			return o;
+		},
 		// 置いてある設備の一覧(種別ごとの台数と、休止しているもの)
 		fac: () => {
 			const n = {}, off = [];
