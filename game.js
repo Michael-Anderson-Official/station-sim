@@ -20,6 +20,9 @@ const CFG = {
 	HEAD_SLOW_FAST: 480,   // 続行間隔: 遅い種別の直後に速い種別(秒)
 	HEAD_FAST_SLOW: 120,   // 続行間隔: 速い種別の直後に遅い種別(秒)
 	ENTER_WINDOW: 2700,    // この先これだけの間に乗れるスジが無ければ客は入場しない(秒)
+	FAST_SHARE: 0.35,      // 優等が走っているとき「速い列車を待つ」客の割合
+	PREF_GIVEUP: 720,      // これだけ待つと妥協して普通にも乗る(秒)
+	RUN_PER_CAR: 900,      // 1両を1本走らせるごとの運行費(円)
 	LOAD_ROOM: 0.35,       // 到着時に空いている定員の割合
 	ALIGHT_ROOM: 0.4,      // 降車1人につき空く席の割合
 	PLAT_Y: 1.1,           // ホーム面の高さ
@@ -1549,16 +1552,19 @@ function compileSched() {
 	R.depIdx.sort((a, b) => a.dep - b.dep);
 
 	R.issues = issues;
+	R.hasFast = live.some(s => s.ty >= 1);   // 優等が1本でもあるか
 	R.allSlots = out;          // 無効なものも含む(UIで赤表示するため)
 	R.trackBusy = new Array(Math.max(1, S.nTrack)).fill(0);
 	if (DIA.open) drawDia();
 }
 
-// この先しばらくの間に、その番線から乗れるスジがあるか
-function nextDepOn(track, fromT) {
+// この先しばらくの間に、その番線から「その志向の客が乗れる」スジがあるか
+function nextDepOn(track, fromT, pref) {
 	for (let i = 0; i < R.depIdx.length; i++) {
 		const s = R.depIdx[i];
-		if (s.dep >= fromT && s.track === track) return s;
+		if (s.dep < fromT || s.track !== track) continue;
+		if (pref !== undefined && !canRide(s.ty, pref)) continue;
+		return s;
 	}
 	return null;
 }
@@ -1612,7 +1618,10 @@ function updateTrains(dt) {
 				}
 			} else {
 				tr.gone = true;
-				const left = waitingFor(tr.track);
+				// 運行費は発車ごとに掛かる。本数を増やせば増えるほど重くなる
+				const run = tr.cars * CFG.RUN_PER_CAR * (1 + tr.ty * 0.18);
+				S.money -= run; S.todayRun = (S.todayRun || 0) + run;
+				const left = waitingFor(tr.track, tr.ty);
 				if (left > 0) {
 					R.missAcc[tr.track] = (R.missAcc[tr.track] || 0) + left;
 					if (left > tr.cap * 0.15) {
@@ -1741,6 +1750,8 @@ function addPax(dir, plat, track, x, y, z, born) {
 	p.born = born === undefined ? R.now : born;
 	p.ph = Math.random() * 6.283;
 	p.head = dir === 0 ? 0 : Math.PI;
+	// 優等が走っているときだけ「速い列車を待つ」客が現れる
+	p.pref = (dir === 1 && R.hasFast && Math.random() < CFG.FAST_SHARE) ? 1 : 0;
 	const pal = dir === 0 ? PAL_OUT : PAL_IN;
 	p.col = pal[(Math.random() * pal.length) | 0];
 	p.path = dir === 0 ? pathOut(p) : pathIn(p);
@@ -1763,19 +1774,31 @@ function spawnAlighted(tr, n) {
 	countPax(n, tr.fare * TYPES[tr.ty].fareMul);
 }
 
-// 線路ごとの待機客はカウンタで持つ(毎回 R.pax を全走査すると高速再生で潰れる)
-function countWaiting(track) { return R.waitN[track] || 0; }
-function waitingFor(track) { return R.waitW[track] || 0; }
+/* 待機客のカウンタ。番線 × 志向(0=どれでもいい / 1=速い列車を待つ) の2次元を
+   フラット配列で持つ。毎回 R.pax を全走査すると高速再生で潰れるため */
+function wIdx(track, pref) { return track * 2 + pref; }
+// その種別の列車に、その志向の客が乗るか。優等は両方乗せ、普通は待つ客を乗せない
+function canRide(ty, pref) { return pref === 0 || ty >= 1; }
+
+function countWaiting(track) { return (R.waitN[wIdx(track, 0)] || 0) + (R.waitN[wIdx(track, 1)] || 0); }
+// その列車に乗れたはずの客(積み残しの計算に使う)
+function waitingFor(track, ty) {
+	let n = R.waitW[wIdx(track, 0)] || 0;
+	if (ty >= 1) n += R.waitW[wIdx(track, 1)] || 0;
+	return n;
+}
 
 function recountWaiting() {
-	R.waitN = new Array(Math.max(1, S.nTrack)).fill(0);
-	R.waitW = new Array(Math.max(1, S.nTrack)).fill(0);
+	const n = Math.max(1, S.nTrack) * 2;
+	R.waitN = new Array(n).fill(0);
+	R.waitW = new Array(n).fill(0);
 	R.maxWaitW = 1;
 	for (let i = 0; i < R.pax.length; i++) {
 		const p = R.pax[i];
 		if (p.state !== 'waitTrain') continue;
-		if (p.track >= R.waitN.length) p.track = R.waitN.length - 1;
-		R.waitN[p.track]++; R.waitW[p.track] += p.w;
+		if (p.track >= S.nTrack) p.track = S.nTrack - 1;
+		const k = wIdx(p.track, p.pref || 0);
+		R.waitN[k]++; R.waitW[k] += p.w;
 		if (p.w > R.maxWaitW) R.maxWaitW = p.w;
 	}
 }
@@ -1786,13 +1809,16 @@ function boardWaiting(tr, maxPeople) {
 	for (let i = R.pax.length - 1; i >= 0; i--) {
 		const p = R.pax[i];
 		if (p.state !== 'waitTrain' || p.track !== tr.track) continue;
+		// 速い列車を待っている客は普通に乗らない
+		if (!canRide(tr.ty, p.pref || 0)) continue;
 		// この客がホームに着いてから何本見送ったか
 		p.missed = Math.max(0, miss - (p.missAt || 0));
 		// 1エージェント = p.w 人。人数で先に判定しないとドア扱い量を超える
 		if (took + p.w > maxPeople) break;
 		finishPax(p);
 		R.pax.splice(i, 1);
-		R.waitN[p.track]--; R.waitW[p.track] -= p.w;
+		const k = wIdx(p.track, p.pref || 0);
+		R.waitN[k]--; R.waitW[k] -= p.w;
 		took += p.w;
 	}
 	countPax(took, tr.fare * TYPES[tr.ty].fareMul);
@@ -1801,8 +1827,9 @@ function boardWaiting(tr, maxPeople) {
 
 function countPax(people, mul) {
 	S.todayPax += people;
-	// 改札が無いと運賃を取りこぼす。種別によって取り分が変わる
-	const fare = CFG.FARE * (gateCount() > 0 ? 1 : CFG.NO_GATE_FARE) * (mul === undefined ? 1 : mul);
+	// 改札が無いと運賃を取りこぼす。種別と駅の格で取り分が変わる
+	const fare = CFG.FARE * (gateCount() > 0 ? 1 : CFG.NO_GATE_FARE)
+		* (mul === undefined ? 1 : mul) * (1 + S.rank * 0.06);
 	// 運賃の駅取り分 + 駅ナカ店舗の売上(通行客の一部が買う)
 	const rev = people * fare + people * S.shops * 6.2;
 	S.todayRev += rev;
@@ -1853,7 +1880,16 @@ function updatePax(dt) {
 
 	for (let i = R.pax.length - 1; i >= 0; i--) {
 		const p = R.pax[i];
-		if (p.state === 'waitTrain') continue;
+		if (p.state === 'waitTrain') {
+			// 速い列車を待ちすぎた客は妥協して普通にも乗るようになる
+			if (p.pref === 1 && R.now - p.readyAt > CFG.PREF_GIVEUP) {
+				const a = wIdx(p.track, 1), b = wIdx(p.track, 0);
+				R.waitN[a]--; R.waitW[a] -= p.w;
+				p.pref = 0;
+				R.waitN[b]++; R.waitW[b] += p.w;
+			}
+			continue;
+		}
 
 		if (p.state === 'queue') {
 			if (R.now >= p.until) {
@@ -1906,11 +1942,12 @@ function updatePax(dt) {
 			if (node.exit) { finishPax(p); R.pax.splice(i, 1); continue; }
 			if (node.board) {
 				// ホームに着いた時点で番線を選び直す。歩いている間に列車が出ていることがある
-				const best = pickBoardTrack();
+				const best = pickBoardTrack(p.pref || 0);
 				if (best >= 0 && best !== p.track && trackPlat(best) === p.plat) p.track = best;
 				p.state = 'waitTrain'; p.readyAt = R.now;
 				p.missAt = R.missAcc[p.track] || 0;   // 積み残しの基準点
-				R.waitN[p.track]++; R.waitW[p.track] += p.w;
+				const k = wIdx(p.track, p.pref || 0);
+				R.waitN[k]++; R.waitW[k] += p.w;
 				if (p.w > R.maxWaitW) R.maxWaitW = p.w;
 				continue;
 			}
@@ -2012,15 +2049,17 @@ function updateDemand(dt) {
 	}
 }
 
-function pickBoardTrack() {
-	// 次に発車するスジが最も早い番線を選ぶ。同着なら空いている方
+function pickBoardTrack(pref) {
+	// 自分が乗れるスジのうち、次に発車するものが最も早い番線を選ぶ
 	let best = -1, bt = Infinity;
 	for (let t = 0; t < S.nTrack; t++) {
-		const s = nextDepOn(t, S.t + 60);
+		const s = nextDepOn(t, S.t + 60, pref);
 		if (!s) continue;
 		const eta = s.dep + countWaiting(t) * 0.01;
 		if (eta < bt) { bt = eta; best = t; }
 	}
+	// 速い列車を待つ客でも、行き先が無ければ普通で妥協する
+	if (best < 0 && pref === 1) return pickBoardTrack(0);
 	return best;
 }
 
@@ -2056,7 +2095,9 @@ function endOfDay() {
 
 	S.log.unshift({
 		day: S.day, pax: Math.round(S.todayPax), rev: Math.round(S.todayRev),
-		cost: cost, lease: fleetLease(), sat: Math.round(sat), town: S.town,
+		cost: cost, lease: fleetLease(), run: Math.round(S.todayRun || 0),
+		fixed: cost - fleetLease(),
+		sat: Math.round(sat), town: S.town,
 		rank: RANKS[S.rank].name, trains: R.sched.length,
 	});
 	if (S.log.length > 40) S.log.length = 40;
@@ -2066,7 +2107,7 @@ function endOfDay() {
 	}
 
 	S.day++;
-	S.todayPax = 0; S.todayRev = 0;
+	S.todayPax = 0; S.todayRev = 0; S.todayRun = 0;
 	R.satSum = 0; R.satN = 0;
 	R.missAcc = new Array(Math.max(1, S.nTrack)).fill(0);
 	// S.t が巻き戻るのでスジのカーソルを先頭に戻す
@@ -2167,7 +2208,8 @@ const UPGRADES = [
 		desc: () => '駅員が切符を切る通路。安く置けるが 約'
 			+ CFG.GATE_M_HEADWAY + '秒に1人と遅く、駅員の人件費が1日 '
 			+ yen(CFG.STAFF_WAGE) + ' かかる。現在 ' + S.gateM + '通路。',
-		cost: () => 260000 * Math.pow(1.12, S.gateM),
+		// 指数だと台数が増えたとき数学的に到達不能になるので緩やかにする
+		cost: () => 260000 * (1 + S.gateM * 0.05),
 		can: () => S.gateM < 40,
 		ng: () => '上限',
 		apply: () => { S.gateM++; },
@@ -2176,7 +2218,8 @@ const UPGRADES = [
 		id: 'gateA', ic: '🎫', name: '自動改札を1台設置',
 		desc: () => '約' + CFG.GATE_A_HEADWAY + '秒に1人と速く、維持費も安い。'
 			+ '初期費用は高い。現在 ' + S.gateA + '台。',
-		cost: () => 1900000 * Math.pow(1.10, S.gateA),
+		// 新宿級には140台前後必要になる。指数だと絶対に届かないので線形に近づける
+		cost: () => 1900000 * (1 + S.gateA * 0.006),
 		can: () => S.gateA < 220,
 		ng: () => '上限',
 		apply: () => { S.gateA++; },
@@ -2184,7 +2227,7 @@ const UPGRADES = [
 	{
 		id: 'track', ic: '🛤', name: '線路を増設',
 		desc: '発着できる列車が増え、輸送力が上がる。ホーム1面につき2線まで。',
-		cost: () => 3200000 * Math.pow(1.45, S.nTrack - 1),
+		cost: () => 3200000 * Math.pow(1.30, S.nTrack - 1),
 		can: () => S.nTrack < S.nPlat * 2,
 		ng: () => '先にホームを増設',
 		apply: () => { S.nTrack++; },
@@ -2759,7 +2802,7 @@ function updateUI(rdt) {
 	UI.paxBox.textContent = num(S.todayPax);
 
 	let waiting = 0;
-	for (let i = 0; i < R.waitW.length; i++) waiting += R.waitW[i];
+	for (let i = 0; i < R.waitW.length; i++) waiting += R.waitW[i] || 0;
 	const outside = (R.inQ.length - R.inQHead) * R.paxScale;
 	UI.waitBox.textContent = num(waiting) + (outside > 0 ? '+' + num(outside) : '');
 	UI.satBox.textContent = Math.round(S.rep);
@@ -2812,12 +2855,19 @@ function renderLog() {
 		el.innerHTML = '<p class="hint">1日の営業が終わると（毎朝4時）ここに日報が届きます。</p>';
 		return;
 	}
-	el.innerHTML = S.log.map(r =>
-		'<div class="rep"><b>' + r.day + '日目</b><i>' + r.rank + '</i><br>' +
-		'乗降 <b>' + num(r.pax) + '</b>人<i>満足度 ' + r.sat + '</i><br>' +
-		'収入 ' + yen(r.rev) + '<i>維持費 ' + yen(r.cost) + '</i><br>' +
-		'街の発展 ' + r.town.toFixed(2) + '</div>'
-	).join('');
+	el.innerHTML = S.log.map(r => {
+		const run = r.run || 0, lease = r.lease || 0, fixed = r.fixed !== undefined ? r.fixed : r.cost - lease;
+		const profit = r.rev - r.cost - run;
+		return '<div class="rep"><b>' + r.day + '日目</b><i>' + r.rank + '</i><br>' +
+			'乗降 <b>' + num(r.pax) + '</b>人<i>満足度 ' + r.sat + '</i><br>' +
+			'運賃収入 ' + yen(r.rev) + (r.trains ? '<i>' + r.trains + '本</i>' : '') + '<br>' +
+			'　リース ' + yen(-lease) + '<br>' +
+			'　運行費 ' + yen(-run) + '<br>' +
+			'　施設維持 ' + yen(-fixed) + '<br>' +
+			'<b style="color:' + (profit >= 0 ? '#7ee0a0' : '#ff8a7a') + '">損益 ' +
+			(profit >= 0 ? '+' : '−') + yen(Math.abs(profit)) + '</b>' +
+			'<i>街 ' + r.town.toFixed(2) + '</i></div>';
+	}).join('');
 }
 
 /* ================= 描画 ================= */
