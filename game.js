@@ -97,6 +97,73 @@ function typeFits(mid, ty) { return modelOf(mid).fit.indexOf(ty) >= 0; }
 function contractPrice(mid, cars) { return modelOf(mid).price * cars; }
 function contractLease(mid, cars) { return modelOf(mid).lease * cars; }
 
+/* ================= 駅周辺の開発 =================
+   乗客は「駅の周りに何があるか」で決まる。用途ごとに時間帯の形が違い、
+   乗車(駅から出る)と降車(駅に着く)を別々に持つので朝夕の向きが再現される。
+   配列は0時〜23時。読み込み時に「1日の乗降の半分」になるよう正規化する */
+const PROF = {
+	// 住宅地: 朝に出て、夕方から夜に帰ってくる
+	home: {
+		out: [.002, .001, 0, 0, 0, .002, .005, .010, .012, .012, .015, .018, .020, .020, .022, .030, .045, .080, .105, .095, .070, .045, .025, .010],
+		in: [0, 0, 0, 0, .005, .020, .055, .115, .085, .045, .025, .018, .015, .015, .015, .015, .012, .010, .008, .006, .004, .003, .002, .001],
+	},
+	// オフィス: 朝に着いて、夕方に帰る
+	office: {
+		out: [0, 0, 0, 0, 0, .005, .030, .120, .190, .080, .030, .015, .012, .010, .010, .008, .008, .006, .005, .004, .003, .002, .001, 0],
+		in: [0, 0, 0, 0, 0, 0, .002, .004, .006, .008, .010, .012, .015, .015, .018, .025, .045, .085, .130, .090, .050, .025, .010, .004],
+	},
+	// 学校: 朝が鋭く、帰りはオフィスより早い
+	school: {
+		out: [0, 0, 0, 0, 0, .002, .025, .150, .180, .040, .010, .006, .005, .005, .005, .004, .004, .003, .002, .001, 0, 0, 0, 0],
+		in: [0, 0, 0, 0, 0, 0, .002, .003, .004, .005, .006, .008, .012, .020, .045, .095, .120, .085, .045, .020, .008, .003, .001, 0],
+	},
+	// 商業: 昼から夕方に広く分布する
+	shop: {
+		out: [0, 0, 0, 0, 0, .002, .005, .010, .020, .035, .055, .065, .070, .065, .060, .060, .055, .045, .035, .022, .012, .006, .002, 0],
+		in: [0, 0, 0, 0, 0, .001, .003, .006, .012, .020, .035, .050, .060, .065, .065, .070, .075, .070, .060, .045, .028, .015, .006, .002],
+	},
+};
+// 乗車・降車それぞれの合計が 0.5 になるよう正規化する(合計で1日の乗降になる)
+for (const k in PROF) {
+	for (const dir of ['in', 'out']) {
+		const a = PROF[k][dir];
+		let s = 0;
+		for (const v of a) s += v;
+		for (let i = 0; i < a.length; i++) a[i] = a[i] / s * 0.5;
+	}
+}
+
+/* 開発できるもの。pax = 1日の乗降(人)、rep = 建てるのに必要な評判 */
+const DEVS = [
+	{ id: 'home1', ic: '🏘', name: '住宅地', prof: 'home', pax: 900, cost: 2500000, growth: 1.12, rep: 0,
+		desc: '朝に出て夜に帰る。1日を通して使われる基礎需要' },
+	{ id: 'school', ic: '🏫', name: '高校', prof: 'school', pax: 1800, cost: 9000000, growth: 1.20, rep: 52,
+		desc: '朝が鋭く、帰りは夕方前。休日は動かない' },
+	{ id: 'office1', ic: '🏢', name: 'オフィス', prof: 'office', pax: 2600, cost: 15000000, growth: 1.15, rep: 58,
+		desc: '朝の降車と夕方の乗車に集中する' },
+	{ id: 'shop1', ic: '🏬', name: '商業施設', prof: 'shop', pax: 4200, cost: 32000000, growth: 1.16, rep: 64,
+		desc: '昼から夕方に広く分布。ラッシュを避けた需要' },
+	{ id: 'univ', ic: '🎓', name: '大学', prof: 'school', pax: 7500, cost: 60000000, growth: 1.18, rep: 70,
+		desc: '高校より規模が大きく、時間帯も少し広い' },
+	{ id: 'office2', ic: '🏙', name: '高層オフィス', prof: 'office', pax: 16000, cost: 130000000, growth: 1.14, rep: 76,
+		desc: '朝夕のピークが一段跳ね上がる' },
+	{ id: 'home2', ic: '🌆', name: 'ニュータウン', prof: 'home', pax: 26000, cost: 210000000, growth: 1.13, rep: 80,
+		desc: '沿線人口そのものを増やす大規模開発' },
+	{ id: 'center', ic: '🌃', name: '副都心開発', prof: 'office', pax: 200000, cost: 1000000000, growth: 1.10, rep: 86,
+		desc: '駅を都市の中心にする。新宿級に到達する唯一の道' },
+];
+const DEV = {};
+for (const d of DEVS) DEV[d.id] = d;
+
+function devCount(id) { return (S.devs && S.devs[id]) | 0; }
+function devCost(d) { return Math.round(d.cost * Math.pow(d.growth, devCount(d.id))); }
+// 1日の潜在乗降(人)。開発が無ければゼロ
+function potentialPax() {
+	let n = 0;
+	for (const d of DEVS) n += d.pax * devCount(d.id);
+	return n;
+}
+
 // 時間帯別の需要倍率 (0時〜23時)
 const HOURLY = [
 	0.06, 0.02, 0.00, 0.00, 0.10, 0.55, 1.45, 2.95, 3.10, 1.75,
@@ -125,6 +192,8 @@ function defaultState() {
 		gateA: 0,             // 自動改札の通路数
 		concW: 0,             // コンコースの片側拡張幅
 		shops: 0,             // 駅ナカ店舗
+		// 駅周辺の開発。これが乗客の源。開業時は小さな住宅地が1つあるだけ
+		devs: { home1: 1 },
 		// 契約している編成。1要素 = 形式×両数ごとの保有本数
 		fleet: [],            // [{m:'kiha40', cars:2, n:1}]
 		// パターンダイヤ。1行を展開して1日ぶんのスジになる
@@ -154,7 +223,7 @@ const R = {
 	trackBusy: [],        // 番線ごとに空く時刻
 	need: 0, short: 0,    // 所要編成数 / 不足数
 	issues: [],           // ダイヤの問題(UIで赤表示)
-	missAcc: [],          // 番線ごとの積み残し累計(満足度計算用)
+	missAcc: [],          // [番線×2+志向] ごとの積み残し発生本数(満足度計算用)
 	stairFree: [],        // [plat][k] 階段が空く時刻
 	gateFree: [],         // 改札レーンが空く時刻
 	platCount: [],        // ホーム上の人数(混雑計算用)
@@ -1489,6 +1558,8 @@ function compileSched() {
 	// 1. パターンを展開
 	for (const d of S.dia) {
 		if (d.every <= 0 || d.to <= d.from) continue;
+		// 不正な off がセーブに残っていても先頭を落とさない
+		d.off = ((d.off || 0) % d.every + d.every) % d.every;
 		const model = modelOf(d.m);
 		const bad = [];
 		if (d.cars > S.cars) bad.push('ホーム有効長' + S.cars + '両では' + d.cars + '両は着けられない');
@@ -1509,31 +1580,60 @@ function compileSched() {
 		}
 	}
 
-	out.sort((a, b) => a.dep - b.dep);
-
-	// 2. 検証: 同一番線の重複と、駅の外(単線・追い越し不可)の続行間隔
+	// 2a. 同一番線の占有は「到着順」で見る。停車時間が違うと発車順では判定を誤る
+	const byArr = out.slice().sort((a, b) => a.arr - b.arr);
 	const lastOnTrack = [];
-	for (let i = 0; i < out.length; i++) {
-		const s = out[i];
+	for (const s of byArr) {
 		const prevT = lastOnTrack[s.track];
 		if (prevT !== undefined && s.arr < prevT.dep + CFG.OCC_IN) {
 			s.ok = false;
 			issues.push({ dia: s.dia, at: s.arr, msg: (s.track + 1) + '番線が塞がっている' });
-		} else lastOnTrack[s.track] = s;
-		// 発車順は全番線で共通(追い越しは駅の外では起きない)
-		if (i > 0) {
-			const p = out[i - 1];
-			const need = headwayFor(p.ty, s.ty);
-			if (s.dep - p.dep < need) {
+			continue;                       // 失格スジは番線を塞いだ扱いにしない
+		}
+		lastOnTrack[s.track] = s;
+	}
+
+	// 2b. 発車順は全番線で共通(駅の外は単線で追い越しが起きない)。
+	//     基準にするのは「有効な直前のスジ」。無効なスジを基準にすると失格が連鎖する
+	out.sort((a, b) => a.dep - b.dep);
+	let prev = null;
+	for (const s of out) {
+		if (!s.ok) continue;
+		if (prev) {
+			const need = headwayFor(prev.ty, s.ty);
+			if (s.dep - prev.dep < need) {
 				s.ok = false;
-				issues.push({ dia: s.dia, at: s.dep, msg: TYPES[p.ty].name + 'の' + Math.round(need / 60) + '分後まで' + TYPES[s.ty].name + 'は発車できない' });
+				issues.push({ dia: s.dia, at: s.dep, msg: TYPES[prev.ty].name + 'の' + Math.round(need / 60) + '分後まで' + TYPES[s.ty].name + 'は発車できない' });
+				continue;
 			}
 		}
+		prev = s;
+	}
+
+	// 3. 契約している編成の本数で運用できるスジだけを残す。
+	//    折返し CFG.TURN を空けて次のスジに就ける
+	const pool = {};
+	for (const f of S.fleet) pool[f.m + '/' + f.cars] = new Array(f.n).fill(-1e9);
+	const liveByArr = out.filter(s => s.ok).sort((a, b) => a.arr - b.arr);
+	let usedPeak = 0, busyNow = [];
+	for (const s of liveByArr) {
+		const key = s.m + '/' + s.cars;
+		const free = pool[key];
+		if (!free) { s.ok = false; continue; }
+		// いちばん早く空く編成に割り当てる
+		let bi = 0;
+		for (let i = 1; i < free.length; i++) if (free[i] < free[bi]) bi = i;
+		if (free[bi] > s.arr - CFG.SPAWN_LEAD) {
+			s.ok = false;
+			issues.push({ dia: s.dia, at: s.arr, msg: modelOf(s.m).name + s.cars + '両の編成が足りない' });
+			continue;
+		}
+		free[bi] = s.dep + CFG.TURN;
 	}
 
 	const live = out.filter(s => s.ok);
 
-	// 3. 所要編成数(同時に線路上に居る本数の最大)をスイープラインで求める
+	// 4. 所要編成数(同時に線路上に居る本数の最大)をスイープラインで求める
 	const ev = [];
 	for (const s of live) { ev.push([s.arr - CFG.SPAWN_LEAD, 1]); ev.push([s.dep + CFG.TURN, -1]); }
 	ev.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
@@ -1554,7 +1654,14 @@ function compileSched() {
 	R.issues = issues;
 	R.hasFast = live.some(s => s.ty >= 1);   // 優等が1本でもあるか
 	R.allSlots = out;          // 無効なものも含む(UIで赤表示するため)
+	R.diaVer = (R.diaVer || 0) + 1;          // 待機客に番線を選び直させるための版数
+
+	// 在線中の列車を引き継ぐ。0クリアすると走っている列車の上に入線してしまう
 	R.trackBusy = new Array(Math.max(1, S.nTrack)).fill(0);
+	for (const tr of R.trains) {
+		if (tr.gone || tr.track >= R.trackBusy.length) continue;
+		R.trackBusy[tr.track] = Math.max(R.trackBusy[tr.track], tr.tDep + CFG.OCC_IN);
+	}
 	if (DIA.open) drawDia();
 }
 
@@ -1580,6 +1687,17 @@ function updateTrains(dt) {
 		const tr = R.trains[i];
 
 		if (!tr.mesh && now >= tr.tArr - CFG.APPROACH_T) attachTrainMesh(tr);
+
+		// まだ着いていない列車は、前の列車が延びていたら押し出される(場内待ち)
+		if (!tr.arrived) {
+			for (const o of R.trains) {
+				if (o === tr || o.gone || o.track !== tr.track) continue;
+				if (o.tArr < tr.tArr && o.tDep + CFG.OCC_IN > tr.tArr) {
+					const push = o.tDep + CFG.OCC_IN - tr.tArr;
+					tr.tArr += push; tr.tDep += push; tr.late = (tr.late || 0) + push;
+				}
+			}
+		}
 
 		// 到着: 降車客を確定し、空き容量を決める
 		if (!tr.arrived && now >= tr.tArr) {
@@ -1611,6 +1729,8 @@ function updateTrains(dt) {
 		if (!tr.gone && now >= tr.tDep) {
 			if (tr.alightLeft > 0.5) {
 				tr.tDep = now + tr.alightLeft / Math.max(0.1, tr.flow);
+				// 延びたぶん在線も伸ばさないと、後続が同じ番線に重なる
+				R.trackBusy[tr.track] = Math.max(R.trackBusy[tr.track] || 0, tr.tDep + CFG.OCC_IN);
 				if (!tr.lateWarn) {
 					tr.lateWarn = true;
 					S.rep = Math.max(0, S.rep - 0.05);
@@ -1621,9 +1741,16 @@ function updateTrains(dt) {
 				// 運行費は発車ごとに掛かる。本数を増やせば増えるほど重くなる
 				const run = tr.cars * CFG.RUN_PER_CAR * (1 + tr.ty * 0.18);
 				S.money -= run; S.todayRun = (S.todayRun || 0) + run;
+				// 積み残しは「本数」で数える。人数を足すと finishPax の 240秒/本 が破綻する。
+				// その列車に乗れたはずの志向の客にだけ1本ぶん記録する
 				const left = waitingFor(tr.track, tr.ty);
 				if (left > 0) {
-					R.missAcc[tr.track] = (R.missAcc[tr.track] || 0) + left;
+					const k0 = wIdx(tr.track, 0);
+					R.missAcc[k0] = (R.missAcc[k0] || 0) + 1;
+					if (tr.ty >= 1) {
+						const k1 = wIdx(tr.track, 1);
+						R.missAcc[k1] = (R.missAcc[k1] || 0) + 1;
+					}
 					if (left > tr.cap * 0.15) {
 						alertOnce('left', '⚠ 積み残し — 停車時間か本数が足りません', false, 30);
 					}
@@ -1771,7 +1898,8 @@ function spawnAlighted(tr, n) {
 			platX(plat) + side * (S.platW / 2 - 1.0),
 			CFG.PLAT_Y, doorZ(di));
 	}
-	countPax(n, tr.fare * TYPES[tr.ty].fareMul);
+	// tr.fare には既に種別倍率(不適合なら1.0)が入っている。二重に掛けない
+	countPax(n, tr.fare);
 }
 
 /* 待機客のカウンタ。番線 × 志向(0=どれでもいい / 1=速い列車を待つ) の2次元を
@@ -1805,23 +1933,24 @@ function recountWaiting() {
 
 function boardWaiting(tr, maxPeople) {
 	let took = 0;
-	const miss = R.missAcc[tr.track] || 0;
-	for (let i = R.pax.length - 1; i >= 0; i--) {
+	// 先に来た客から乗せる(末尾から走査すると後から来た客が先に乗ってしまう)
+	for (let i = 0; i < R.pax.length; i++) {
 		const p = R.pax[i];
 		if (p.state !== 'waitTrain' || p.track !== tr.track) continue;
 		// 速い列車を待っている客は普通に乗らない
 		if (!canRide(tr.ty, p.pref || 0)) continue;
+		const k = wIdx(p.track, p.pref || 0);
 		// この客がホームに着いてから何本見送ったか
-		p.missed = Math.max(0, miss - (p.missAt || 0));
+		p.missed = Math.max(0, (R.missAcc[k] || 0) - (p.missAt || 0));
 		// 1エージェント = p.w 人。人数で先に判定しないとドア扱い量を超える
 		if (took + p.w > maxPeople) break;
 		finishPax(p);
 		R.pax.splice(i, 1);
-		const k = wIdx(p.track, p.pref || 0);
+		i--;
 		R.waitN[k]--; R.waitW[k] -= p.w;
 		took += p.w;
 	}
-	countPax(took, tr.fare * TYPES[tr.ty].fareMul);
+	countPax(took, tr.fare);
 	return took;
 }
 
@@ -1881,12 +2010,26 @@ function updatePax(dt) {
 	for (let i = R.pax.length - 1; i >= 0; i--) {
 		const p = R.pax[i];
 		if (p.state === 'waitTrain') {
+			// ダイヤが変わったら番線を選び直す。乗るはずのスジが消えていることがある
+			if (p.diaVer !== R.diaVer) {
+				p.diaVer = R.diaVer;
+				const nt = pickBoardTrack(p.pref || 0);
+				if (nt >= 0 && nt !== p.track && trackPlat(nt) === p.plat) {
+					const o = wIdx(p.track, p.pref || 0);
+					R.waitN[o]--; R.waitW[o] -= p.w;
+					p.track = nt;
+					const k = wIdx(p.track, p.pref || 0);
+					R.waitN[k]++; R.waitW[k] += p.w;
+					p.missAt = R.missAcc[k] || 0;
+				}
+			}
 			// 速い列車を待ちすぎた客は妥協して普通にも乗るようになる
 			if (p.pref === 1 && R.now - p.readyAt > CFG.PREF_GIVEUP) {
 				const a = wIdx(p.track, 1), b = wIdx(p.track, 0);
 				R.waitN[a]--; R.waitW[a] -= p.w;
 				p.pref = 0;
 				R.waitN[b]++; R.waitW[b] += p.w;
+				p.missAt = R.missAcc[b] || 0;   // 基準点を移した先に合わせる
 			}
 			continue;
 		}
@@ -1945,8 +2088,9 @@ function updatePax(dt) {
 				const best = pickBoardTrack(p.pref || 0);
 				if (best >= 0 && best !== p.track && trackPlat(best) === p.plat) p.track = best;
 				p.state = 'waitTrain'; p.readyAt = R.now;
-				p.missAt = R.missAcc[p.track] || 0;   // 積み残しの基準点
 				const k = wIdx(p.track, p.pref || 0);
+				p.missAt = R.missAcc[k] || 0;         // 積み残しの基準点
+				p.diaVer = R.diaVer;                  // 待ち始めたときのダイヤ版数
 				R.waitN[k]++; R.waitW[k] += p.w;
 				if (p.w > R.maxWaitW) R.maxWaitW = p.w;
 				continue;
@@ -1989,11 +2133,31 @@ function hourFactor() {
 	return a + (b - a) * (h - Math.floor(h));
 }
 
-function demandPerSec() {
-	// 街の発展度 × 時間帯 × 評判
-	const base = 120 * S.town;                       // 人/時 の基準
+// 時刻 h における配列の補間値
+function profAt(a, h) {
+	const i = Math.floor(h) % 24, j = (i + 1) % 24;
+	return a[i] + (a[j] - a[i]) * (h - Math.floor(h));
+}
+
+/* いまの需要(人/秒)。駅の周りに何があるかで決まる。
+   評判は「その駅を使いたいか」の係数として掛かる */
+function demandNow() {
+	const h = hourOfDay();
+	let din = 0, dout = 0;
+	for (const d of DEVS) {
+		const n = devCount(d.id);
+		if (!n) continue;
+		const P = PROF[d.prof];
+		din += d.pax * n * profAt(P.in, h);
+		dout += d.pax * n * profAt(P.out, h);
+	}
 	const rep = 0.55 + (S.rep / 100) * 0.75;
-	return base * hourFactor() * rep / 3600;
+	return { in: din * rep / 3600, out: dout * rep / 3600 };
+}
+
+function demandPerSec() {
+	const d = demandNow();
+	return d.in + d.out;
 }
 
 function updateDemand(dt) {
@@ -2005,18 +2169,18 @@ function updateDemand(dt) {
 		if (s && s.dep - S.t <= CFG.ENTER_WINDOW) served = true;
 	}
 
-	const d = demandPerSec();
+	const dm = demandNow();
 	// エージェント数が上限に近づいたら1人=N人にスケール
-	const want = Math.ceil(d * 220 / CFG.MAX_PAX);
+	const want = Math.ceil((dm.in + dm.out) * 220 / CFG.MAX_PAX);
 	R.paxScale = Math.max(1, want);
 
 	// 降車客は列車が運んでくる。運んでくる列車が無いなら溜めない
-	if (served) R.outPool += d * 0.5 * dt;
+	if (served) R.outPool += dm.out * dt;
 	R.outPool = Math.min(R.outPool, CFG.CAR_CAP * CFG.CARS_MAX * 3);
 
 	// 入場客は駅前から入ってくる。駅が飽和していたら外で待たされる(入場規制)
 	if (served) {
-		R.inAccum += d * 0.5 * dt / R.paxScale;
+		R.inAccum += dm.in * dt / R.paxScale;
 		while (R.inAccum >= 1) { R.inAccum -= 1; R.inQ.push(R.now); }
 	}
 
@@ -2082,12 +2246,10 @@ function endOfDay() {
 	S.money -= cost;
 	S.todayCost = cost;
 
-	const sat = R.satN > 0 ? R.satSum / R.satN : S.rep;
-	// 評判はその日の満足度へ寄っていく
-	S.rep = Math.max(0, Math.min(100, S.rep + (sat - S.rep) * 0.35));
-	// 評判が良ければ街が発展 = 需要増 (悪ければ客離れ)
-	const growth = (S.rep - 50) / 120;
-	S.town = Math.max(0.3, S.town * (1 + growth));
+	// 誰も駅を使っていない日は評判を動かさない(列車を走らせずに評判が上がるのを防ぐ)
+	const sat = R.satN > 0 ? R.satSum / R.satN : null;
+	if (sat !== null) S.rep = Math.max(0, Math.min(100, S.rep + (sat - S.rep) * 0.35));
+	S.town = potentialPax() / 10000;   // 表示用(万人/日)
 
 	S.yesterdayPax = S.todayPax;
 	const oldRank = S.rank;
@@ -2097,7 +2259,7 @@ function endOfDay() {
 		day: S.day, pax: Math.round(S.todayPax), rev: Math.round(S.todayRev),
 		cost: cost, lease: fleetLease(), run: Math.round(S.todayRun || 0),
 		fixed: cost - fleetLease(),
-		sat: Math.round(sat), town: S.town,
+		sat: sat === null ? '—' : Math.round(sat), town: S.town,
 		rank: RANKS[S.rank].name, trains: R.sched.length,
 	});
 	if (S.log.length > 40) S.log.length = 40;
@@ -2109,7 +2271,7 @@ function endOfDay() {
 	S.day++;
 	S.todayPax = 0; S.todayRev = 0; S.todayRun = 0;
 	R.satSum = 0; R.satN = 0;
-	R.missAcc = new Array(Math.max(1, S.nTrack)).fill(0);
+	R.missAcc = new Array(Math.max(1, S.nTrack) * 2).fill(0);
 	// S.t が巻き戻るのでスジのカーソルを先頭に戻す
 	compileSched();
 	save();
@@ -2268,13 +2430,29 @@ const UPGRADES = [
 
 function descOf(u) { return typeof u.desc === 'function' ? u.desc() : u.desc; }
 
+/* 編成を1本も持っていない間は、いちばん安い契約ぶんの資金を残しておく。
+   これを守らないと「列車が無い→客が来ない→収入ゼロ」で詰む */
+function reserveForFirstTrain() {
+	if (S.fleet.length) return 0;
+	let min = Infinity;
+	for (const m of MODELS) {
+		if (S.rank < m.rank) continue;
+		for (const c of m.cars) {
+			if (c > S.cars) continue;
+			min = Math.min(min, contractPrice(m.id, c));
+		}
+	}
+	return min === Infinity ? 0 : min;
+}
+function canSpend(cost) { return S.money - cost >= reserveForFirstTrain(); }
+
 function renderUpgrades() {
 	const el = document.getElementById('upgrades');
 	el.innerHTML = '';
 	for (const u of UPGRADES) {
 		const ok = u.can();
 		const cost = Math.round(u.cost());
-		const afford = S.money >= cost;
+		const afford = canSpend(cost);
 		const b = document.createElement('button');
 		b.className = 'up';
 		b.disabled = !ok || !afford;
@@ -2285,7 +2463,7 @@ function renderUpgrades() {
 		b._u = u;
 		b.onclick = () => {
 			const c = Math.round(u.cost());
-			if (!u.can() || S.money < c) return;
+			if (!u.can() || !canSpend(c)) return;
 			navigator.vibrate && navigator.vibrate(12);
 			S.money -= c;
 			u.apply();
@@ -2293,6 +2471,43 @@ function renderUpgrades() {
 			buildStation();
 			save();
 			renderUpgrades();
+		};
+		el.appendChild(b);
+	}
+}
+
+/* ---- 周辺開発の一覧 ---- */
+function renderDevs() {
+	const el = document.getElementById('devList');
+	if (!el) return;
+	const sum = document.getElementById('devSum');
+	if (sum) {
+		const p = potentialPax();
+		sum.innerHTML = '沿線の潜在需要 <b style="color:#7ee0a0;font-size:13px">' + num(p) + '人/日</b>'
+			+ '（評判' + Math.round(S.rep) + 'で実効 ' + num(Math.round(p * (0.55 + S.rep / 100 * 0.75))) + '人/日）';
+	}
+	el.innerHTML = '';
+	for (const d of DEVS) {
+		const n = devCount(d.id);
+		const cost = devCost(d);
+		const locked = S.rep < d.rep;
+		const b = document.createElement('button');
+		b.className = 'up';
+		b.disabled = locked || !canSpend(cost);
+		b.innerHTML =
+			'<span class="ic">' + d.ic + '</span>' +
+			'<span class="tx"><b>' + d.name + (n ? ' ×' + n : '') + '</b>' +
+			'<span>' + d.desc + '　+' + num(d.pax) + '人/日</span></span>' +
+			'<span class="pr">' + (locked ? '評判' + d.rep + 'から' : yen(cost)) + '</span>';
+		b.onclick = () => {
+			const c = devCost(d);
+			if (S.rep < d.rep || !canSpend(c)) return;
+			S.money -= c;
+			if (!S.devs) S.devs = {};
+			S.devs[d.id] = devCount(d.id) + 1;
+			S.town = potentialPax() / 10000;
+			navigator.vibrate && navigator.vibrate(12);
+			renderDevs(); buildStation(); save();
 		};
 		el.appendChild(b);
 	}
@@ -2325,7 +2540,7 @@ function resetRuntimeForLayout() {
 	// レイアウトが変わると有効なスジが変わるので、走行中の列車は消してダイヤを組み直す
 	for (const tr of R.trains) if (tr.mesh) trainGroup.remove(tr.mesh);
 	R.trains.length = 0;
-	R.missAcc = new Array(Math.max(1, S.nTrack)).fill(0);
+	R.missAcc = new Array(Math.max(1, S.nTrack) * 2).fill(0);
 	recountWaiting();
 	compileSched();
 }
@@ -2584,10 +2799,28 @@ function buildInspector(d) {
 	}
 	box.appendChild(tyRow);
 
+	// 契約済みの「形式×両数」から選ぶ
+	const combos = S.fleet.map(f => ({ m: f.m, cars: f.cars }));
+	if (combos.length) {
+		const at = Math.max(0, combos.findIndex(c => c.m === d.m && c.cars === d.cars));
+		box.appendChild(stepper('編成', () => at,
+			v => {
+				const n = combos.length;
+				const c = combos[((v % n) + n) % n];
+				d.m = c.m; d.cars = c.cars;
+			},
+			v => modelOf(combos[((v % combos.length) + combos.length) % combos.length].m).name
+				+ ' ' + combos[((v % combos.length) + combos.length) % combos.length].cars + '両'));
+	}
+
 	box.appendChild(stepper('番線', () => d.track,
 		v => { d.track = Math.max(0, Math.min(S.nTrack - 1, v)); }, v => (v + 1) + '番線'));
 	box.appendChild(stepper('間隔', () => d.every,
-		v => { d.every = Math.max(2, Math.min(240, v)); }, v => v + '分毎'));
+		v => {
+			d.every = Math.max(2, Math.min(240, v));
+			// ずらしが間隔以上だと先頭が展開されず、黙って本数が減る
+			d.off = ((d.off || 0) % d.every + d.every) % d.every;
+		}, v => v + '分毎'));
 	box.appendChild(stepper('ずらし', () => d.off || 0,
 		v => { const e = Math.max(1, d.every); d.off = ((v % e) + e) % e; }, v => v + '分'));
 	box.appendChild(stepper('停車', () => d.dwell,
@@ -2758,8 +2991,17 @@ function initUI() {
 	});
 
 	const sheet = document.getElementById('sheet');
-	document.getElementById('buildBtn').onclick = () => { renderUpgrades(); sheet.hidden = false; };
+	document.getElementById('buildBtn').onclick = () => { renderUpgrades(); renderDevs(); sheet.hidden = false; };
 	document.getElementById('sheetClose').onclick = () => { sheet.hidden = true; };
+	document.querySelectorAll('#upSeg button').forEach(b => {
+		b.onclick = () => {
+			document.querySelectorAll('#upSeg button').forEach(x => x.classList.toggle('on', x === b));
+			const dev = b.dataset.up === 'dev';
+			document.getElementById('facPane').hidden = dev;
+			document.getElementById('devPane').hidden = !dev;
+			if (dev) renderDevs(); else renderUpgrades();
+		};
+	});
 
 	initDiaUI();
 

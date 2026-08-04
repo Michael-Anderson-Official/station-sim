@@ -49,11 +49,23 @@
 
 <section id="sheet" hidden>
 	<div class="sheetHead">
-		<h2>増築メニュー</h2>
+		<h2>増築</h2>
 		<button id="sheetClose">✕</button>
 	</div>
-	<div id="upgrades"></div>
-	<p class="hint">ボトルネックは「階段」「改札」「線路」。どこが詰まっているかは駅を見れば分かります。</p>
+	<div class="seg" id="upSeg">
+		<button data-up="fac" class="on">駅設備</button>
+		<button data-up="dev">周辺開発</button>
+	</div>
+	<div id="facPane">
+		<div id="upgrades"></div>
+		<p class="hint">ボトルネックは「階段」「改札」「線路」。どこが詰まっているかは駅を見れば分かります。</p>
+	</div>
+	<div id="devPane" hidden>
+		<p class="hint" id="devSum"></p>
+		<div id="devList"></div>
+		<p class="hint">乗客は駅の周りに何があるかで決まります。開発しない限り増えません。
+			用途によって朝夕どちらに偏るかが違うので、ダイヤと噛み合わせてください。</p>
+	</div>
 	<button id="resetBtn">はじめから（セーブ削除）</button>
 </section>
 
