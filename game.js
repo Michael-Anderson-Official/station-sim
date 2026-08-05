@@ -260,6 +260,8 @@ function layTrackAndPlat() {
 /* ---- 駅舎(橋上/地下)と出入口 ----
    幾何が決まったあとに敷く。地平駅は駅舎を建てない */
 function layStructure() {
+	if (!DV.plats.length) { B.sk = { LU: 0, pw: 1, unit: 0, startX: GRID.OX, plen: 1,
+		pz0: GRID.OZ, pz1: GRID.OZ, px0: [], fx0: GRID.OX, fx1: GRID.OX, fz0: GRID.OZ, fz1: GRID.OZ }; return; }
 	const LU = hasLink() ? 1 : 0;
 	bldFit();
 	let fx0, fx1, fz0, fz1;
@@ -1563,7 +1565,7 @@ function defaultState() {
 		// 置いた設備。[{i:永続ID, k:種別, a:アンカー(0=駅舎/1=ホーム), n:ホーム面, x,z:相対マス}]
 		fac: [], nextFid: 1,
 		// 線路とホームはユーザーが置く。これが盤面の正
-		rail: [],             // 左レールの列 [{x}]。盤の端から端まで通る
+		rail: [{ x: GRID.OX - 1 }],   // 左レールの列 [{x}]。開業時は1本だけ通っている
 		plat: [],             // ホームのマス [{x,z}]
 		shops: 0,             // 駅ナカ店舗
 		// 駅周辺の開発。これが乗客の源。開業時は小さな住宅地が1つあるだけ
@@ -2084,7 +2086,7 @@ function initThree() {
 		antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: DEV,
 	});
 	renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-	renderer.setSize(window.innerWidth, window.innerHeight);
+	renderer.setSize(Math.max(1, window.innerWidth || 1), Math.max(1, window.innerHeight || 1));
 	renderer.outputEncoding = THREE.sRGBEncoding;
 	renderer.toneMapping = THREE.ACESFilmicToneMapping;
 	renderer.toneMappingExposure = 1.05;
@@ -2098,7 +2100,7 @@ function initThree() {
 	scene = new THREE.Scene();
 	scene.fog = new THREE.Fog(0x8098b0, 700, 3400);
 
-	camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 1, 9000);
+	camera = new THREE.PerspectiveCamera(48, Math.max(1, window.innerWidth || 1) / Math.max(1, window.innerHeight || 1), 1, 9000);
 
 	controls = new THREE.OrbitControls(camera, renderer.domElement);
 	controls.enableDamping = true;
@@ -2152,10 +2154,15 @@ function fitShadow() {
 	sun.target.updateMatrixWorld();
 }
 
+/* 画面の大きさが一瞬0になることがある(タブが非表示のとき、iOSの画面回転中など)。
+   そのまま0で設定すると canvas が 0×0 のまま固まり、aspect が NaN になって
+   以後なにも映らなくなる。必ず1以上に丸める */
 function onResize() {
-	camera.aspect = window.innerWidth / window.innerHeight;
+	const w = Math.max(1, window.innerWidth || 0), h = Math.max(1, window.innerHeight || 0);
+	if (w < 2 || h < 2) return;
+	camera.aspect = w / h;
 	camera.updateProjectionMatrix();
-	renderer.setSize(window.innerWidth, window.innerHeight);
+	renderer.setSize(w, h);
 }
 
 /* ===== 乗客の見た目 =====
@@ -3899,7 +3906,7 @@ function load() {
 		// 線路とホームを持っていなかった頃のセーブ。いまの見た目のまま起こし直す
 		if (!Array.isArray(S.rail)) S.rail = [];
 		if (!Array.isArray(S.plat)) S.plat = [];
-		if (!S.rail.length && !S.plat.length) migrateLayout();
+		if (S.plat.length === 0 && S.rail.length <= 1 && (o.nPlat > 0 && o.cars > 0 && o.nTrack > 0 && o.plat === undefined)) { S.rail = []; migrateLayout(); }
 		if (!Array.isArray(S.fac)) S.fac = [];
 		S.nextFid = Math.max(1, S.nextFid | 0);
 		for (const f of S.fac) if (f.i >= S.nextFid) S.nextFid = f.i + 1;
@@ -4171,6 +4178,296 @@ function resetRuntimeForLayout() {
 	compileSched();
 }
 
+
+
+/* ================= 3Dの上で建てる =================
+   指の下のマスをレイキャストで拾う。1本指は建てる操作、視点は2本指。
+   ホームはドラッグで矩形を引き、寸法と両数を見ながら ✓ で確定する */
+const BUILD = {
+	on: false,
+	tool: 'plat',        // 'plat' | 'rail' | 'erase'
+	from: null, to: null,   // 引いている矩形
+	ghost: null, ghostGeo: null,
+	pending: null,       // 確定待ち {kind, cells, cost}
+	pointers: 0,
+	undo: [],
+	savedSpeed: undefined,
+};
+
+const _ray = new THREE.Raycaster();
+const _ndc = new THREE.Vector2();
+const _plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const _hitPt = new THREE.Vector3();
+
+// 画面の点 → 盤面のマス
+function pickCell(clientX, clientY, y) {
+	if (!renderer) return null;
+	const r = renderer.domElement.getBoundingClientRect();
+	_ndc.x = ((clientX - r.left) / r.width) * 2 - 1;
+	_ndc.y = -((clientY - r.top) / r.height) * 2 + 1;
+	_ray.setFromCamera(_ndc, camera);
+	_plane.constant = -(y || 0);
+	if (!_ray.ray.intersectPlane(_plane, _hitPt)) return null;
+	const x = cx(_hitPt.x), z = cz(_hitPt.z);
+	return inBoard(x, z) ? { x: x, z: z } : null;
+}
+
+const BUILD_PRICE = { plat: 60000, rail: 4200000 };   // ホームは1マス、線路は1本
+const BUILD_REFUND = 0.5;
+
+/* ---- ホームの矩形 ---- */
+function platRectCells(a, b) {
+	const x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x);
+	const z0 = Math.min(a.z, b.z), z1 = Math.max(a.z, b.z);
+	const cells = [];
+	for (let x = x0; x <= x1; x++) for (let z = z0; z <= z1; z++) cells.push({ x: x, z: z });
+	return { x0: x0, x1: x1, z0: z0, z1: z1, cells: cells };
+}
+
+/* 置けるか。空きマスであること、そして線路か既存ホームに接していること
+   (宙に浮いたホームを作らせない) */
+/* 判定は「ユーザーが置いたもの」だけを見る。
+   駅前の帯や駅舎は骨格として毎回焼き直されるので、障害物として数えない
+   (数えるとホームを南へ伸ばせなくなる) */
+function isRailCell(x, z) {
+	void z;
+	for (const r of S.rail) if (x === r.x || x === r.x + 1) return true;
+	return false;
+}
+function isPlatCell(x, z) {
+	for (const c of S.plat) if (c.x === x && c.z === z) return true;
+	return false;
+}
+function platRectWhy(r) {
+	for (const c of r.cells) {
+		if (!inBoard(c.x, c.z)) return '盤の外';
+		if (isRailCell(c.x, c.z)) return '線路の上には置けない';
+		if (isPlatCell(c.x, c.z)) return 'すでにホームがある';
+	}
+	// 線路か既存のホームに接していること(宙に浮いたホームを作らせない)
+	for (const c of r.cells) {
+		for (const d of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+			const x = c.x + d[0], z = c.z + d[1];
+			if (isRailCell(x, z) || isPlatCell(x, z)) return null;
+		}
+	}
+	return '線路かホームに接していないと置けない';
+}
+
+/* 引いている矩形が何両ぶんになるか。線路に沿った長さで決まる */
+function platRectCars(r) {
+	return Math.floor(((r.z1 - r.z0 + 1) * GRID.CELL) / CFG.CAR_LEN);
+}
+
+/* ---- ゴースト ---- */
+function buildGhost() {
+	if (!BUILD.ghost) {
+		BUILD.ghostGeo = new THREE.BoxGeometry(1, 0.5, 1);
+		const m = new THREE.MeshBasicMaterial({ color: C(0x7ee0a0), transparent: true, opacity: 0.5, depthTest: false });
+		BUILD.ghost = new THREE.Mesh(BUILD.ghostGeo, m);
+		BUILD.ghost.renderOrder = 999;
+		scene.add(BUILD.ghost);
+	}
+	const g = BUILD.ghost;
+	const p = BUILD.pending;
+	if (!BUILD.on || !p) { g.visible = false; return; }
+	g.visible = true;
+	const w = (p.x1 - p.x0 + 1) * GRID.CELL, d = (p.z1 - p.z0 + 1) * GRID.CELL;
+	g.scale.set(w, 1, d);
+	g.position.set((wx(p.x0) + wx(p.x1)) / 2, CFG.PLAT_Y * 0.6, (wz(p.z0) + wz(p.z1)) / 2);
+	g.material.color.set(p.why ? C(0xc8503c) : C(0x7ee0a0));
+}
+
+/* ---- 操作 ---- */
+function buildUpdatePending() {
+	if (BUILD.tool === 'plat' && BUILD.from && BUILD.to) {
+		const r = platRectCells(BUILD.from, BUILD.to);
+		r.kind = 'plat';
+		r.why = platRectWhy(r);
+		r.cost = r.cells.length * BUILD_PRICE.plat;
+		if (!r.why && S.money < r.cost) r.why = '資金が足りない';
+		BUILD.pending = r;
+	} else if (BUILD.tool === 'rail' && BUILD.to) {
+		const x = BUILD.to.x;
+		const r = { kind: 'rail', x0: x, x1: x + 1, z0: 0, z1: GRID.D - 1, cells: [], cost: BUILD_PRICE.rail };
+		r.why = null;
+		for (let i = 0; i < 2; i++) {
+			if (!inBoard(x + i, 0)) { r.why = '盤の外'; break; }
+		}
+		if (!r.why) {
+			for (let i = 0; i < 2 && !r.why; i++) {
+				if (isRailCell(x + i, 0)) r.why = 'すでに線路がある';
+				else for (const c of S.plat) if (c.x === x + i) { r.why = 'ホームが乗っている'; break; }
+			}
+		}
+		if (!r.why && S.money < r.cost) r.why = '資金が足りない';
+		BUILD.pending = r;
+	}
+	buildGhost();
+	renderBuildBar();
+}
+
+// ✓ 確定
+function buildConfirm() {
+	const p = BUILD.pending;
+	if (!p || p.why) return;
+	if (p.kind === 'plat') {
+		for (const c of p.cells) S.plat.push({ x: c.x, z: c.z });
+		BUILD.undo.push({ plat: p.cells.slice(), cost: p.cost });
+	} else {
+		S.rail.push({ x: p.x0 });
+		S.rail.sort((a, b) => a.x - b.x);
+		BUILD.undo.push({ rail: p.x0, cost: p.cost });
+	}
+	S.money -= p.cost;
+	BUILD.pending = null; BUILD.from = null; BUILD.to = null;
+	facApply(); buildGhost(); renderBuildBar(); save();
+}
+
+// ✕ 取り消し
+function buildCancel() {
+	BUILD.pending = null; BUILD.from = null; BUILD.to = null;
+	buildGhost(); renderBuildBar();
+}
+
+function buildUndo() {
+	const u = BUILD.undo.pop();
+	if (!u) return;
+	if (u.plat) {
+		for (const c of u.plat) {
+			const i = S.plat.findIndex(q => q.x === c.x && q.z === c.z);
+			if (i >= 0) S.plat.splice(i, 1);
+		}
+	} else if (u.rail !== undefined) {
+		const i = S.rail.findIndex(q => q.x === u.rail);
+		if (i >= 0) S.rail.splice(i, 1);
+	}
+	S.money += u.cost;
+	facApply(); renderBuildBar(); save();
+}
+
+// 撤去。タップしたマスのホーム、無ければ線路
+function buildEraseAt(c) {
+	let i = S.plat.findIndex(q => q.x === c.x && q.z === c.z);
+	if (i >= 0) {
+		S.plat.splice(i, 1);
+		S.money += Math.round(BUILD_PRICE.plat * BUILD_REFUND);
+		facApply(); renderBuildBar(); save();
+		return;
+	}
+	i = S.rail.findIndex(q => q.x === c.x || q.x + 1 === c.x);
+	if (i >= 0) {
+		const x = S.rail[i].x;
+		// その線路に接しているホームが浮いてしまわないか見てから消す
+		S.rail.splice(i, 1);
+		S.money += Math.round(BUILD_PRICE.rail * BUILD_REFUND);
+		facApply(); renderBuildBar(); save();
+		void x;
+	}
+}
+
+function initBuild3D() {
+	const dom = renderer.domElement;
+	dom.addEventListener('pointerdown', e => {
+		BUILD.pointers++;
+		if (!BUILD.on || BUILD.pointers > 1) return;
+		controls.enabled = false;                 // 1本指は建てる操作
+		const c = pickCell(e.clientX, e.clientY, 0);
+		if (!c) return;
+		if (BUILD.tool === 'erase') { buildEraseAt(c); return; }
+		BUILD.from = c; BUILD.to = c;
+		buildUpdatePending();
+	});
+	dom.addEventListener('pointermove', e => {
+		if (!BUILD.on || BUILD.pointers !== 1 || !BUILD.from) return;
+		const c = pickCell(e.clientX, e.clientY, 0);
+		if (!c) return;
+		BUILD.to = c;
+		buildUpdatePending();
+	});
+	const up = () => {
+		BUILD.pointers = Math.max(0, BUILD.pointers - 1);
+		if (BUILD.pointers === 0) controls.enabled = true;
+	};
+	dom.addEventListener('pointerup', up);
+	dom.addEventListener('pointercancel', up);
+}
+
+const B3_TOOLS = [
+	{ id: 'plat', ic: '🚉', name: 'ホーム' },
+	{ id: 'rail', ic: '🛤', name: '線路' },
+	{ id: 'erase', ic: '🗑', name: '撤去' },
+];
+
+function renderBuildBar() {
+	const el = document.getElementById('b3Tools');
+	if (!el) return;
+	el.innerHTML = '';
+	for (const t of B3_TOOLS) {
+		const b = document.createElement('button');
+		b.innerHTML = '<b>' + t.ic + '</b><span>' + t.name + '</span>';
+		if (BUILD.tool === t.id) b.className = 'on';
+		b.onclick = () => { BUILD.tool = t.id; buildCancel(); renderBuildBar(); };
+		el.appendChild(b);
+	}
+	const info = document.getElementById('b3Info');
+	const ok = document.getElementById('b3Ok');
+	const ng = document.getElementById('b3Ng');
+	const p = BUILD.pending;
+	if (info) {
+		if (!p) {
+			info.textContent = BUILD.tool === 'plat' ? 'ホームを引く'
+				: BUILD.tool === 'rail' ? '線路を敷く場所をタップ' : '消したいものをタップ';
+		} else if (p.kind === 'plat') {
+			const w = p.x1 - p.x0 + 1, d = p.z1 - p.z0 + 1;
+			info.textContent = w + '×' + d + 'マス (' + (w * GRID.CELL) + 'm×' + (d * GRID.CELL) + 'm) '
+				+ platRectCars(p) + '両 · ' + yen(p.cost) + (p.why ? ' — ' + p.why : '');
+		} else {
+			info.textContent = '線路1本 · ' + yen(p.cost) + (p.why ? ' — ' + p.why : '');
+		}
+	}
+	if (ok) { ok.hidden = !p; ok.disabled = !!(p && p.why); }
+	if (ng) ng.hidden = !p;
+	const m = document.getElementById('b3Money');
+	if (m) m.textContent = yen(S.money);
+	const st = document.getElementById('b3Stat');
+	if (st) {
+		const np = DV.plats.length, nt = DV.tracks.length;
+		st.textContent = np ? (np + '面' + nt + '線 ' + G.cars + '両') : (nt + '線 · ホームがまだ無い');
+	}
+	const un = document.getElementById('b3Undo');
+	if (un) un.disabled = !BUILD.undo.length;
+}
+
+function openBuild3D() {
+	BUILD.on = true;
+	BUILD.undo.length = 0;
+	buildCancel();
+	document.getElementById('b3Bar').hidden = false;
+	BUILD.savedSpeed = R.speed;
+	R.speed = 0;
+	document.querySelectorAll('#speed button').forEach(x => x.classList.toggle('active', +x.dataset.speed === 0));
+	renderBuildBar();
+}
+function closeBuild3D() {
+	BUILD.on = false;
+	buildCancel();
+	document.getElementById('b3Bar').hidden = true;
+	controls.enabled = true;
+	if (BUILD.savedSpeed !== undefined) {
+		R.speed = BUILD.savedSpeed;
+		document.querySelectorAll('#speed button').forEach(x => x.classList.toggle('active', +x.dataset.speed === R.speed));
+	}
+	save();
+}
+
+function initBuildUI() {
+	document.getElementById('b3Btn').onclick = () => (BUILD.on ? closeBuild3D() : openBuild3D());
+	document.getElementById('b3Close').onclick = closeBuild3D;
+	document.getElementById('b3Ok').onclick = buildConfirm;
+	document.getElementById('b3Ng').onclick = buildCancel;
+	document.getElementById('b3Undo').onclick = buildUndo;
+}
 
 /* ================= 2Dの配置ビュー =================
    盤面をそのまま真上から見る。駅は細長い(新宿級で72×172マス)ので、
@@ -5750,6 +6047,8 @@ function boot() {
 	buildStation();
 	fitCamera();
 	initPlanUI();
+	initBuild3D();
+	initBuildUI();
 	G.night = -1;
 	updateSky();
 	renderLog();
@@ -5764,14 +6063,14 @@ function boot() {
 		// 開発用: 指定サイズで1枚描いてサーバーに保存する(serve.mjs --dev が必要)
 		shot: (w, h, hour) => {
 			if (hour !== undefined) { S.t = ((hour - 4 + 24) % 24) * 3600; updateSky(); }
-			const ow = renderer.domElement.width, oh = renderer.domElement.height;
+			const ow = Math.max(1, window.innerWidth || 1), oh = Math.max(1, window.innerHeight || 1);
 			renderer.setSize(w || 1280, h || 800, false);
 			camera.aspect = (w || 1280) / (h || 800);
 			camera.updateProjectionMatrix();
 			renderPax();
 			renderer.render(scene, camera);
 			const url = renderer.domElement.toDataURL('image/png');
-			renderer.setSize(ow, oh, false);
+			renderer.setSize(ow, oh);
 			camera.aspect = ow / oh; camera.updateProjectionMatrix();
 			return fetch('/__shot', { method: 'POST', body: url }).then(r => r.text());
 		},

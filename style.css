@@ -95,6 +95,46 @@ html, body {
 #buildBtn { right: 12px; background: #f0a020; color: #2a1c00; }
 #diaBtn { right: 106px; background: #2f7de0; color: #fff; }
 #planBtn { right: 200px; background: #4a9d6a; color: #fff; }
+#b3Btn {
+	position: fixed; bottom: calc(env(safe-area-inset-bottom) + 68px); right: 12px; z-index: 6;
+	border: none; border-radius: 999px; font-weight: 800; font-size: 14px;
+	padding: 12px 20px; box-shadow: 0 3px 12px rgba(0,0,0,.45);
+	font-family: inherit; background: #c8763c; color: #fff;
+}
+#b3Btn:active { transform: scale(.96); }
+
+/* ===== 3Dの上で建てる ===== */
+#b3Bar {
+	position: fixed; left: 0; right: 0; bottom: 0; z-index: 12;
+	background: rgba(11,17,27,.96); padding-bottom: env(safe-area-inset-bottom);
+}
+#b3Head { display: flex; align-items: center; gap: 6px; padding: 8px 10px 0; }
+#b3Info { flex: 1; font-size: 11px; font-weight: 700; opacity: .85; line-height: 1.4; }
+#b3Head button {
+	flex: none; border: none; font-family: inherit; font-size: 13px; font-weight: 800;
+	padding: 10px 16px; border-radius: 9px; min-height: 42px;
+}
+#b3Ok { background: #4a9d6a; color: #fff; }
+#b3Ok:disabled { background: rgba(255,255,255,.1); color: #6b7686; }
+#b3Ng { background: rgba(255,255,255,.12); color: #e8eef7; padding: 10px 14px; }
+#b3Tools { display: flex; gap: 6px; padding: 8px 10px; }
+#b3Tools button {
+	flex: 1; min-height: 52px; border: none; border-radius: 9px;
+	background: rgba(255,255,255,.08); color: #cfe0f5; font-family: inherit;
+	display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+}
+#b3Tools button b { font-size: 18px; font-weight: 400; line-height: 1; }
+#b3Tools button span { font-size: 10px; font-weight: 700; }
+#b3Tools button.on { background: #c8763c; color: #fff; }
+#b3Foot { display: flex; align-items: center; gap: 8px; padding: 0 10px 8px; }
+#b3Foot button {
+	border: none; background: rgba(255,255,255,.1); color: #e8eef7;
+	font-family: inherit; font-size: 11px; font-weight: 700;
+	padding: 9px 12px; border-radius: 8px; min-height: 38px;
+}
+#b3Foot button:disabled { opacity: .35; }
+#b3Stat { font-size: 10px; opacity: .6; }
+#b3Money { margin-left: auto; font-size: 13px; font-weight: 800; color: #7ee0a0; font-variant-numeric: tabular-nums; }
 #logBtn { left: 12px; background: rgba(30,42,60,.92); color: #cfe0f5; font-size: 12px; padding: 10px 14px; }
 #buildBtn:active, #logBtn:active, #diaBtn:active, #planBtn:active { transform: scale(.96); }
 
