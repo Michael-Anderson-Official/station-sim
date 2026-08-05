@@ -278,25 +278,24 @@ function gridSkeleton() {
 		fx0 = allX0 - 1; fx1 = allX1 + 1 + S.bldW;   // 東へ広がる
 		fz0 = pz1 - S.bldN;                          // 北(ホーム側)へ張り出す
 		fz1 = pz1 + S.bldD;                          // 南(出口側)へ伸びる
+		fx1 = Math.min(GRID.W - 2, fx1); fz1 = Math.min(GRID.D - 3, fz1);
+		fillRect(LU, fx0, fx1, fz0, fz1, C_FLOOR);
+		fillRect(LU, fx0 + 1, fx1 - 1, fz1, fz1 + 1, C_ENTRANCE);
 	} else {
-		fx0 = allX1 + 2; fx1 = fx0 + 6 + S.bldW;
-		fz0 = pz1 + 2;   fz1 = fz0 + 7 + S.bldD;
-	}
-	fx1 = Math.min(GRID.W - 2, fx1); fz1 = Math.min(GRID.D - 3, fz1);
-	fillRect(LU, fx0, fx1, fz0, fz1, C_FLOOR);
-	fillRect(LU, fx0 + 1, fx1 - 1, fz1, fz1 + 1, C_ENTRANCE);
-
-	// 地平駅は構内踏切。線路を上書きせず属性ビットで重ねる
-	if (!hasStairs()) {
-		const crz = pz1 + 2;
-		for (let x = startX + 2; x <= fx0; x++) {
+		/* 地平駅は駅舎を建てない。改札はホームに直接付ける。
+		   ホームの南端に接して構内通路(線路を渡る)を敷き、その先が出入口 */
+		fx0 = px0[0]; fx1 = px0[S.nPlat - 1] + pw - 1;
+		fz0 = pz0; fz1 = pz1;
+		const crz = Math.min(GRID.D - 6, pz1 + 1);
+		for (let x = allX0; x <= allX1; x++) {
 			for (let z = crz; z <= crz + 1; z++) {
 				if (!inBoard(x, z)) continue;
 				const k = gidx(0, x, z);
-				B.f[k] |= F_CROSS;
+				B.f[k] |= F_CROSS;                       // 線路を上書きせず属性ビットで重ねる
 				if (B.t[k] === C_EMPTY) B.t[k] = C_FLOOR;
 			}
 		}
+		fillRect(0, allX0, allX1, crz + 2, crz + 3, C_ENTRANCE);
 	}
 
 	/* 骨格の寸法。設備の位置はここからの相対で決まるので、
@@ -314,12 +313,12 @@ const K_GATEA = 0, K_GATEM = 1, K_STAIR = 2, K_ESCAL = 3, K_CONV = 4, K_VEND = 5
 
 // obj は B.objs のレコードの k(文字列)。3D生成がこれで分岐しているので変えない
 const FACS = [
-	/* K_GATEA */ { id: 'gateA', obj: 'gateA', name: '自動改札', w: 1, d: 1, cell: C_GATE, on: 'floor', lane: 1, build: 120 },
-	/* K_GATEM */ { id: 'gateM', obj: 'gateM', name: '手動改札', w: 1, d: 1, cell: C_GATE, on: 'floor', lane: 1, build: 60 },
+	/* K_GATEA */ { id: 'gateA', obj: 'gateA', name: '自動改札', w: 1, d: 1, cell: C_GATE, on: 'both', lane: 1, build: 120 },
+	/* K_GATEM */ { id: 'gateM', obj: 'gateM', name: '手動改札', w: 1, d: 1, cell: C_GATE, on: 'both', lane: 1, build: 60 },
 	/* K_STAIR */ { id: 'stair', obj: 'stair', name: '階段', w: 2, d: 5, cell: C_STAIR, on: 'plat', lane: 1, build: 900 },
 	/* K_ESCAL */ { id: 'escal', obj: 'escal', name: 'エスカレーター', w: 2, d: 5, cell: C_ESCAL, on: 'plat', lane: 1, build: 1500 },
-	/* K_CONV  */ { id: 'conv', obj: 'conv', name: '駅ナカ店舗', w: 3, d: 4, cell: C_SHOP, on: 'floor', build: 1800 },
-	/* K_VEND  */ { id: 'vend', obj: 'vend', name: '自販機', w: 1, d: 1, cell: C_VEND, on: 'floor', build: 60 },
+	/* K_CONV  */ { id: 'conv', obj: 'conv', name: '駅ナカ店舗', w: 3, d: 4, cell: C_SHOP, on: 'both', build: 1800 },
+	/* K_VEND  */ { id: 'vend', obj: 'vend', name: '自販機', w: 1, d: 1, cell: C_VEND, on: 'both', build: 60 },
 ];
 
 /* アンカー原点。a=0 は駅舎(コンコース層)、a=1 はホーム n(地上層) */
@@ -339,10 +338,13 @@ function facBaseOK(k, l, x, z) {
 	const F = FACS[k];
 	if (!inBoard(x, z) || !inBoard(x + F.w - 1, z + F.d - 1)) return false;
 	for (let i = 0; i < F.w; i++) for (let j = 0; j < F.d; j++) {
+		const t = B.t[gidx(l, x + i, z + j)];
 		if (F.on === 'plat') {
 			if (B.t[gidx(0, x + i, z + j)] !== C_PLAT) return false;
 			if (B.t[gidx(B.sk.LU, x + i, z + j)] !== C_FLOOR) return false;
-		} else if (B.t[gidx(l, x + i, z + j)] !== C_FLOOR) return false;
+		} else if (F.on === 'both') {
+			if (t !== C_FLOOR && t !== C_PLAT) return false;
+		} else if (t !== C_FLOOR) return false;
 	}
 	return true;
 }
@@ -365,8 +367,8 @@ function facRelocate(r) {
 		}
 		return false;
 	}
-	for (let z = SK.fz1 - 1; z >= SK.fz0 + 1; z--) {
-		for (let x = SK.fx0 + 1; x + F.w - 1 <= SK.fx1 - 1; x++) {
+	for (let z = SK.fz1; z >= SK.fz0; z--) {
+		for (let x = SK.fx0; x + F.w - 1 <= SK.fx1; x++) {
 			if (!facBaseOK(r.k, SK.LU, x, z)) continue;
 			r.a = 0; r.n = 0; r.x = x - SK.fx0; r.z = z - SK.pz1;
 			return true;
@@ -496,7 +498,8 @@ const FAC_REFUND = 0.6;   // 撤去したときに戻る割合
    つまり下地が床/ホームであることを見れば重なりも同時に弾ける */
 const NG_TEXT = {
 	oob: '盤の外', base: 'ここには置けない', over: '別の設備がある',
-	noflo: '駅舎の床の上だけ', noplat: 'ホームの上だけ',
+	noflo: 'コンコースの床の上だけ', noplat: 'ホームの上だけ',
+	nobase: 'ホームか床の上だけ',
 	nolink: '橋上駅舎か地下道が必要', noroof: '真上に駅舎が無い',
 	money: '資金が足りない', cut: '通路を塞いでしまう', max: '上限',
 };
@@ -520,12 +523,18 @@ function facCanPlace(k, a, n, x, z, self) {
 	if (F.on === 'floor' && l !== B.sk.LU) return 'noflo';
 	for (let i = 0; i < F.w; i++) for (let j = 0; j < F.d; j++) {
 		const gx = cx0 + i, gz = cz0 + j;
-		const t = isSelf(l, gx, gz) ? (F.on === 'plat' ? C_PLAT : C_FLOOR) : B.t[gidx(l, gx, gz)];
+		const raw = B.t[gidx(l, gx, gz)];
+		const t = isSelf(l, gx, gz) ? (raw === C_PLAT ? C_PLAT : C_FLOOR) : raw;
 		if (F.on === 'plat') {
 			if (t !== C_PLAT) return t === C_EMPTY ? 'noplat' : 'over';
-			// 階段は真上(または真下)が駅舎の床でないと層を繋げない
+			// 階段は真上(または真下)が床でないと層を繋げない
 			const up = isSelf(B.sk.LU, gx, gz) ? C_FLOOR : B.t[gidx(B.sk.LU, gx, gz)];
 			if (up !== C_FLOOR) return 'noroof';
+		} else if (F.on === 'both') {
+			// 改札・店・自販機はホームの上にも床の上にも置ける
+			if (t !== C_FLOOR && t !== C_PLAT) {
+				return (t === C_EMPTY || t === C_RAIL_L || t === C_RAIL_R) ? 'nobase' : 'over';
+			}
 		} else {
 			if (t !== C_FLOOR) return (t === C_EMPTY || t === C_PLAT || t === C_RAIL_L || t === C_RAIL_R) ? 'noflo' : 'over';
 		}
@@ -654,8 +663,8 @@ function facAutoPlace(k) {
 		return 'noplat';
 	}
 	// 駅舎の中を、出口に近い側から順に探す
-	for (let z = SK.fz1 - 1; z >= SK.fz0 + 1; z--) {
-		for (let x = SK.fx0 + 1; x + F.w - 1 <= SK.fx1 - 1; x++) {
+	for (let z = SK.fz1; z >= SK.fz0; z--) {
+		for (let x = SK.fx0; x + F.w - 1 <= SK.fx1; x++) {
 			const why = facCanPlace(k, 0, 0, x - SK.fx0, z - SK.pz1);
 			if (!why) return facAdd(k, 0, 0, x - SK.fx0, z - SK.pz1);
 		}
@@ -1493,7 +1502,7 @@ function defaultState() {
 	return {
 		day: 1,
 		t: 3600,              // 4:00起点の経過秒。開始は5:00
-		money: 2000000,
+		money: 20000000,
 		rep: 70,              // 評判 0-100
 		town: 1,              // 街の発展度(需要倍率)
 		cars: 2,              // ホーム有効長(両)
@@ -2336,38 +2345,8 @@ function buildStation() {
 				}
 			}
 		} else {
-			// 地平は木造駅舎。下見板張りの壁と切妻の瓦屋根
-			const wh = 3.2;
-			for (const s of [-1, 1]) {
-				box(0.3, wh, bd, MAT.wallWood, bcx + s * bw / 2, uy, bcz, stationGroup);
-			}
-			box(bw, wh, 0.3, MAT.wallWood, bcx, uy, bcz + bd / 2, stationGroup);
-			const openW = Math.min(bw * 0.5, 7), ww = (bw - openW) / 2;
-			for (const s of [-1, 1]) {
-				box(ww, wh, 0.3, MAT.wallWood, bcx + s * (openW + ww) / 2, uy, bcz - bd / 2, stationGroup);
-			}
-			const pitch = 0.36, hw2 = (bw + 2.6) / 2;
-			const peak = Math.tan(pitch) * (bw / 2), ridge = uy + wh + Math.tan(pitch) * hw2;
-			const tri = new THREE.Shape();
-			tri.moveTo(-bw / 2, 0); tri.lineTo(bw / 2, 0); tri.lineTo(0, peak); tri.closePath();
-			for (const z of [bcz - bd / 2, bcz + bd / 2]) {
-				const g = new THREE.Mesh(new THREE.ShapeGeometry(tri), MAT.wallWood);
-				g.position.set(bcx, uy + wh, z);
-				g.castShadow = g.receiveShadow = true;
-				stationGroup.add(g);
-			}
-			const slab = hw2 / Math.cos(pitch);
-			for (const s of [-1, 1]) {
-				const rf = new THREE.Mesh(new THREE.BoxGeometry(slab, 0.26, bd + 2.6), MAT.roofTile);
-				rf.position.set(bcx + s * (hw2 / 2), uy + wh + Math.tan(pitch) * hw2 / 2, bcz);
-				rf.rotation.z = -s * pitch;
-				rf.castShadow = rf.receiveShadow = true;
-				stationGroup.add(rf);
-			}
-			box(0.5, 0.3, bd + 2.8, MAT.beam, bcx, ridge - 0.1, bcz, stationGroup, true);
-			for (const s of [-1, 1]) {
-				box(0.28, 0.34, bd + 2.6, MAT.beam, bcx + s * hw2, uy + wh - 0.1, bcz, stationGroup, true);
-			}
+			// 地平駅は駅舎を建てない。改札はホームに直接付くので、
+			// 出入口まわりは舗装だけを敷いて空を見せる
 		}
 		G.plazaCx = bcx; G.plazaCz = bcz + bd / 2 + 22;
 		G.plazaX = wx(fx1) + 10;
