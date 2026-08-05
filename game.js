@@ -282,20 +282,13 @@ function gridSkeleton() {
 		fillRect(LU, fx0, fx1, fz0, fz1, C_FLOOR);
 		fillRect(LU, fx0 + 1, fx1 - 1, fz1, fz1 + 1, C_ENTRANCE);
 	} else {
-		/* 地平駅は駅舎を建てない。改札はホームに直接付ける。
-		   ホームの南端に接して構内通路(線路を渡る)を敷き、その先が出入口 */
+		/* 田舎の小さな地平駅。駅舎も構内踏切も無い。
+		   改札はホームに直接付き、ホーム端の階段を下りるとそこが駅前 */
 		fx0 = px0[0]; fx1 = px0[S.nPlat - 1] + pw - 1;
 		fz0 = pz0; fz1 = pz1;
-		const crz = Math.min(GRID.D - 6, pz1 + 1);
-		for (let x = allX0; x <= allX1; x++) {
-			for (let z = crz; z <= crz + 1; z++) {
-				if (!inBoard(x, z)) continue;
-				const k = gidx(0, x, z);
-				B.f[k] |= F_CROSS;                       // 線路を上書きせず属性ビットで重ねる
-				if (B.t[k] === C_EMPTY) B.t[k] = C_FLOOR;
-			}
-		}
-		fillRect(0, allX0, allX1, crz + 2, crz + 3, C_ENTRANCE);
+		const ez = Math.min(GRID.D - 5, pz1 + 1);
+		fillRect(0, fx0, fx1, ez, ez + 1, C_FLOOR);        // ホーム端から地面へ下りる所
+		fillRect(0, fx0, fx1, ez + 2, ez + 3, C_ENTRANCE);  // 駅前
 	}
 
 	/* 骨格の寸法。設備の位置はここからの相対で決まるので、
@@ -3017,9 +3010,9 @@ function pathOut(p) {
 		path.push({ x: px, y: G.entryY, z: sz - 10, climb: true });
 	} else {
 		// 地平駅はホーム端のスロープを下り、構内踏切を渡って駅舎へ
+		// 田舎駅は踏切が無い。ホーム端の階段を下りてそのまま駅前へ
 		path.push({ x: px, y: CFG.PLAT_Y, z: G.platZ1 - 3 });
-		path.push({ x: px, y: 0, z: G.crossZ, res: 'cross', rf: 0, hw: CFG.CROSS_HEADWAY, qz: -1 });
-		path.push({ x: G.concX0 + 2, y: 0, z: G.crossZ });
+		path.push({ x: px, y: 0, z: G.crossZ });
 	}
 	// 改札が1つも無い無人駅では素通りする
 	const j = pickGate();
@@ -3059,7 +3052,6 @@ function pathIn(p) {
 		path.push({ x: px, y: G.entryY, z: sz - 10, res: 'stair', rf: k, hw: facHeadway(k) });
 		path.push({ x: px, y: CFG.PLAT_Y, z: sz + 2, climb: true });
 	} else {
-		path.push({ x: G.concX0 + 2, y: 0, z: G.crossZ, res: 'cross', rf: 0, hw: CFG.CROSS_HEADWAY, qx: 1 });
 		path.push({ x: px, y: 0, z: G.crossZ });
 		path.push({ x: px, y: CFG.PLAT_Y, z: G.platZ1 - 3 });
 	}
