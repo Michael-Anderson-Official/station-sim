@@ -4527,6 +4527,36 @@ function renderPlanHead() {
 	}
 }
 
+/* スマホでは開発者コンソールが見られないので、例外は画面に出す。
+   真っ黒な画面だけが残って原因が分からない、という状態を作らない */
+function showErr(msg) {
+	let el = document.getElementById('errBar');
+	if (!el) {
+		el = document.createElement('div');
+		el.id = 'errBar';
+		el.onclick = () => el.remove();
+		document.body.appendChild(el);
+	}
+	el.textContent = String(msg).slice(0, 300);
+}
+if (typeof window !== 'undefined') {
+	window.addEventListener('error', e => {
+		showErr('⚠ ' + (e.message || e.error) + ' @ ' + (e.filename || '?').split('/').pop() + ':' + e.lineno);
+	});
+	window.addEventListener('unhandledrejection', e => showErr('⚠ ' + (e.reason && e.reason.message || e.reason)));
+}
+
+// いまの状態を1行にまとめる。何が起きているか画面で確かめるため
+function planDiag() {
+	try {
+		const cv = document.getElementById('planCv');
+		const r = cv ? cv.getBoundingClientRect() : { width: 0, height: 0 };
+		return '設備' + (S.fac ? S.fac.length : '?') + '個 · ' + PLAN.s.toFixed(0) + 'pt/マス'
+			+ ' · 画面' + Math.round(r.width) + '×' + Math.round(r.height)
+			+ ' · 道具' + (document.getElementById('planTools') || { children: [] }).children.length;
+	} catch (e) { return '診断できず: ' + e.message; }
+}
+
 function openPlan() {
 	PLAN.open = true;
 	document.getElementById('planView').hidden = false;
@@ -4535,16 +4565,27 @@ function openPlan() {
 	document.querySelectorAll('#speed button').forEach(x => x.classList.toggle('active', +x.dataset.speed === 0));
 	/* 途中で転ぶと真っ黒な画面だけが残って原因が分からなくなる。
 	   スマホでは開発者コンソールが見られないので、画面に理由を出す */
-	try {
-		if (!PLAN.cv) initPlanCanvas();
-		PLAN.lay = hasLink() ? 1 : 0;
-		PLAN.tool = 0; PLAN.undo.length = 0; PLAN.ghost = null; PLAN.ng = null;
-		PLAN.sel = null; PLAN.moving = false;
-		planResize(); planFit(); renderPlanTools(); renderPlanHead(); renderPlanSel(); planDraw();
-	} catch (e) {
-		const el = document.getElementById('planInfo');
-		if (el) el.textContent = 'エラー: ' + (e && e.message ? e.message : e);
-		console.error('plan', e);
+	const steps = [
+		['canvas', () => { if (!PLAN.cv) initPlanCanvas(); }],
+		['init', () => {
+			PLAN.lay = hasLink() ? 1 : 0;
+			PLAN.tool = 0; PLAN.undo.length = 0; PLAN.ghost = null; PLAN.ng = null;
+			PLAN.sel = null; PLAN.moving = false;
+		}],
+		['resize', planResize], ['fit', planFit],
+		['tools', renderPlanTools], ['head', renderPlanHead],
+		['sel', renderPlanSel], ['draw', planDraw],
+	];
+	const bad = [];
+	for (const [name, fn] of steps) {
+		try { fn(); } catch (e) { bad.push(name + ':' + (e && e.message ? e.message : e)); }
+	}
+	const info = document.getElementById('planInfo');
+	if (bad.length) {
+		showErr('⚠ 配置 ' + bad.join(' / '));
+		if (info) info.textContent = bad[0].slice(0, 60);
+	} else if (info && !info.textContent) {
+		info.textContent = planDiag();
 	}
 }
 
