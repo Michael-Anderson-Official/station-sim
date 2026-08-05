@@ -109,6 +109,7 @@ html, body {
 	background: rgba(11,17,27,.94);
 }
 #planHead b { font-size: 14px; font-weight: 800; }
+#planVer { font-size: 9px; opacity: .45; }
 #planHead button {
 	border: none; background: rgba(255,255,255,.1); color: #e8eef7;
 	font-family: inherit; font-size: 12px; font-weight: 700;

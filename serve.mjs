@@ -14,6 +14,7 @@ const MIME = {
 	".css": "text/css; charset=utf-8",
 	".png": "image/png",
 	".ico": "image/x-icon",
+	".webmanifest": "application/manifest+json; charset=utf-8",
 };
 
 // 開発用: `node serve.mjs --dev` のときだけ、描画結果のPNGを受け取って保存する。
@@ -47,7 +48,18 @@ const server = http.createServer((req, res) => {
 	if (!file.startsWith(ROOT) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
 		res.writeHead(404); res.end("not found"); return;
 	}
-	res.writeHead(200, { "Content-Type": MIME[path.extname(file)] ?? "application/octet-stream" });
+	/* 開発中は絶対にキャッシュさせない。
+	   ヘッダを何も付けないと iOS Safari が独自の判断で game.js を握り続け、
+	   「HTML だけ新しくて JS が古い」状態になる。新しい画面の箱はあるのに
+	   中身を作る関数が無いので、開いた瞬間に例外で止まって真っ黒になる */
+	const ext = path.extname(file);
+	const head = { "Content-Type": MIME[ext] ?? "application/octet-stream" };
+	if (ext === ".html" || ext === ".js" || ext === ".css" || ext === ".webmanifest") {
+		head["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0";
+		head["Pragma"] = "no-cache";
+		head["Expires"] = "0";
+	}
+	res.writeHead(200, head);
 	fs.createReadStream(file).pipe(res);
 });
 

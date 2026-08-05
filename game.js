@@ -496,7 +496,7 @@ const FAC_REFUND = 0.6;   // 撤去したときに戻る割合
    つまり下地が床/ホームであることを見れば重なりも同時に弾ける */
 const NG_TEXT = {
 	oob: '盤の外', base: 'ここには置けない', over: '別の設備がある',
-	noflo: '駅舎の床の上だけ(⇅で層を切り替え)', noplat: 'ホームの上だけ(⇅で層を切り替え)',
+	noflo: '駅舎の床の上だけ', noplat: 'ホームの上だけ',
 	nolink: '橋上駅舎か地下道が必要', noroof: '真上に駅舎が無い',
 	money: '資金が足りない', cut: '通路を塞いでしまう', max: '上限',
 };
@@ -527,7 +527,7 @@ function facCanPlace(k, a, n, x, z, self) {
 			const up = isSelf(B.sk.LU, gx, gz) ? C_FLOOR : B.t[gidx(B.sk.LU, gx, gz)];
 			if (up !== C_FLOOR) return 'noroof';
 		} else {
-			if (t !== C_FLOOR) return t === C_EMPTY ? 'noflo' : 'over';
+			if (t !== C_FLOOR) return (t === C_EMPTY || t === C_PLAT || t === C_RAIL_L || t === C_RAIL_R) ? 'noflo' : 'over';
 		}
 	}
 	return null;
@@ -4295,6 +4295,13 @@ function renderPlanTools() {
 }
 function planIcon(k) { return ['🎫', '👮', '🪜', '🛗', '🏪', '🥤'][k] || '▪'; }
 
+// 層が2つある駅でだけ「⇅で切り替え」を添える
+function planNGText(why) {
+	let t = NG_TEXT[why] || why;
+	if (hasLink() && (why === 'noflo' || why === 'noplat')) t += '(⇅で層を切り替え)';
+	return t;
+}
+
 function planNG(msg) {
 	PLAN.ng = msg;
 	PLAN.ngAt = Date.now();
@@ -4311,7 +4318,7 @@ function planCommit(px, py) {
 		const cc = { x: c0.x - ((F.w - 1) >> 1), z: c0.z - ((F.d - 1) >> 1) };
 		const A = planAnchorOf(cc.x, cc.z);
 		const why = facMove(PLAN.sel, A.a, A.n, A.x, A.z);
-		if (why) { planNG(NG_TEXT[why] || why); return; }
+		if (why) { planNG(planNGText(why)); return; }
 		PLAN.moving = false;
 		planNG(F.name + 'を動かした(工事 ' + Math.ceil(facBuildLeft(PLAN.sel.i)) + '秒)');
 		renderPlanTools(); renderPlanHead(); renderPlanSel(); planDraw();
@@ -4338,7 +4345,7 @@ function planCommit(px, py) {
 	const k = planToolKind();
 	const A = planAnchorOf(c.x, c.z);
 	const why = facAdd(k, A.a, A.n, A.x, A.z);
-	if (why) { planNG(NG_TEXT[why] || why); return; }
+	if (why) { planNG(planNGText(why)); return; }
 	PLAN.undo.push({ add: S.fac[S.fac.length - 1].i });
 	if (PLAN.undo.length > 20) PLAN.undo.shift();
 	planNG(FACS[k].name + 'を設置 −' + yen(facPrice(k, A.a === 1 ? A.n : 0)));
@@ -4526,11 +4533,19 @@ function openPlan() {
 	PLAN.savedSpeed = R.speed;
 	R.speed = 0;                       // 見ているあいだは時間を止める
 	document.querySelectorAll('#speed button').forEach(x => x.classList.toggle('active', +x.dataset.speed === 0));
-	if (!PLAN.cv) initPlanCanvas();
-	PLAN.lay = hasLink() ? 1 : 0;
-	PLAN.tool = 0; PLAN.undo.length = 0; PLAN.ghost = null; PLAN.ng = null;
-	PLAN.sel = null; PLAN.moving = false;
-	planResize(); planFit(); renderPlanTools(); renderPlanHead(); renderPlanSel(); planDraw();
+	/* 途中で転ぶと真っ黒な画面だけが残って原因が分からなくなる。
+	   スマホでは開発者コンソールが見られないので、画面に理由を出す */
+	try {
+		if (!PLAN.cv) initPlanCanvas();
+		PLAN.lay = hasLink() ? 1 : 0;
+		PLAN.tool = 0; PLAN.undo.length = 0; PLAN.ghost = null; PLAN.ng = null;
+		PLAN.sel = null; PLAN.moving = false;
+		planResize(); planFit(); renderPlanTools(); renderPlanHead(); renderPlanSel(); planDraw();
+	} catch (e) {
+		const el = document.getElementById('planInfo');
+		if (el) el.textContent = 'エラー: ' + (e && e.message ? e.message : e);
+		console.error('plan', e);
+	}
 }
 
 function closePlan() {
