@@ -21,7 +21,50 @@ const MIME = {
 // ブラウザの画面を直接見られない環境で見た目を確認するための口。
 const DEV = process.argv.includes("--dev");
 
+/* ---- ライブリロード ----
+   ファイルを保存したら、繋がっているスマホを即座に読み込み直させる。
+   受信側のスクリプトは index.html を返すときに差し込むので、
+   GitHub Pages に置く静的ファイルには一切入らない */
+const liveClients = new Set();
+const LIVE_TAG = `<script>
+(function () {
+	var es = new EventSource('/__live');
+	es.onmessage = function () { location.reload(); };
+})();
+</script>
+`;
+
+function broadcastReload() {
+	for (const c of liveClients) {
+		try { c.write("data: reload\n\n"); } catch (e) { liveClients.delete(c); }
+	}
+}
+
+let watchTimer = null;
+try {
+	fs.watch(ROOT, { recursive: true }, (ev, name) => {
+		if (!name || !/\.(html|js|css|webmanifest)$/.test(name)) return;
+		clearTimeout(watchTimer);
+		watchTimer = setTimeout(broadcastReload, 150);   // 保存が連続しても1回にまとめる
+	});
+} catch (e) {
+	console.log("  (ファイル監視を開始できませんでした: " + e.message + ")");
+}
+
 const server = http.createServer((req, res) => {
+	// ライブリロードの通知路。切れたら EventSource が勝手に繋ぎ直す
+	if (req.url === "/__live") {
+		res.writeHead(200, {
+			"Content-Type": "text/event-stream; charset=utf-8",
+			"Cache-Control": "no-store",
+			"Connection": "keep-alive",
+		});
+		res.write("retry: 1000\n\n");
+		liveClients.add(res);
+		req.on("close", () => liveClients.delete(res));
+		return;
+	}
+
 	if (DEV && req.method === "POST" && req.url.startsWith("/__shot")) {
 		// ?name= で保存先を指定できる(英数字とハイフンの .png のみ)
 		const q = new URL(req.url, "http://x").searchParams.get("name");
@@ -58,6 +101,31 @@ const server = http.createServer((req, res) => {
 		head["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0";
 		head["Pragma"] = "no-cache";
 		head["Expires"] = "0";
+	}
+	if (ext === ".html") {
+		/* index.html にだけ手を入れる。
+		   ?v= は game.js / style.css の更新時刻に書き換えるので、
+		   版番号を手で上げなくても必ず新しいものが取り直される */
+		let html = fs.readFileSync(file, "utf8");
+		const stamp = f => {
+			try { return fs.statSync(path.join(ROOT, f)).mtimeMs.toString(36); } catch (e) { return "0"; }
+		};
+		// 画面に出す版は game.js の更新時刻。届いている版がひと目で分かる
+		const jsTime = () => {
+			try {
+				const d = fs.statSync(path.join(ROOT, "game.js")).mtime;
+				return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+			} catch (e) { return "?"; }
+		};
+		const jv = stamp("game.js");
+		html = html.replace(/game\.js\?v=[\w.]+/, "game.js?v=" + jv)
+			.replace(/style\.css\?v=[\w.]+/, "style.css?v=" + stamp("style.css"))
+			.replace(/(<span id="planVer">)[^<]*(<\/span>)/, "$1" + jsTime() + "$2")
+			.replace("</body>", LIVE_TAG + "</body>");
+		head["Content-Length"] = Buffer.byteLength(html);
+		res.writeHead(200, head);
+		res.end(html);
+		return;
 	}
 	res.writeHead(200, head);
 	fs.createReadStream(file).pipe(res);
