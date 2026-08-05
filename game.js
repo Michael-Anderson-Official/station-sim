@@ -314,12 +314,12 @@ const K_GATEA = 0, K_GATEM = 1, K_STAIR = 2, K_ESCAL = 3, K_CONV = 4, K_VEND = 5
 
 // obj は B.objs のレコードの k(文字列)。3D生成がこれで分岐しているので変えない
 const FACS = [
-	/* K_GATEA */ { id: 'gateA', obj: 'gateA', name: '自動改札', w: 1, d: 1, cell: C_GATE, on: 'floor', lane: 1 },
-	/* K_GATEM */ { id: 'gateM', obj: 'gateM', name: '手動改札', w: 1, d: 1, cell: C_GATE, on: 'floor', lane: 1 },
-	/* K_STAIR */ { id: 'stair', obj: 'stair', name: '階段', w: 2, d: 5, cell: C_STAIR, on: 'plat', lane: 1 },
-	/* K_ESCAL */ { id: 'escal', obj: 'escal', name: 'エスカレーター', w: 2, d: 5, cell: C_ESCAL, on: 'plat', lane: 1 },
-	/* K_CONV  */ { id: 'conv', obj: 'conv', name: '駅ナカ店舗', w: 3, d: 4, cell: C_SHOP, on: 'floor' },
-	/* K_VEND  */ { id: 'vend', obj: 'vend', name: '自販機', w: 1, d: 1, cell: C_VEND, on: 'floor' },
+	/* K_GATEA */ { id: 'gateA', obj: 'gateA', name: '自動改札', w: 1, d: 1, cell: C_GATE, on: 'floor', lane: 1, build: 120 },
+	/* K_GATEM */ { id: 'gateM', obj: 'gateM', name: '手動改札', w: 1, d: 1, cell: C_GATE, on: 'floor', lane: 1, build: 60 },
+	/* K_STAIR */ { id: 'stair', obj: 'stair', name: '階段', w: 2, d: 5, cell: C_STAIR, on: 'plat', lane: 1, build: 900 },
+	/* K_ESCAL */ { id: 'escal', obj: 'escal', name: 'エスカレーター', w: 2, d: 5, cell: C_ESCAL, on: 'plat', lane: 1, build: 1500 },
+	/* K_CONV  */ { id: 'conv', obj: 'conv', name: '駅ナカ店舗', w: 3, d: 4, cell: C_SHOP, on: 'floor', build: 1800 },
+	/* K_VEND  */ { id: 'vend', obj: 'vend', name: '自販機', w: 1, d: 1, cell: C_VEND, on: 'floor', build: 60 },
 ];
 
 /* アンカー原点。a=0 は駅舎(コンコース層)、a=1 はホーム n(地上層) */
@@ -501,22 +501,31 @@ const NG_TEXT = {
 	money: '資金が足りない', cut: '通路を塞いでしまう', max: '上限',
 };
 
-function facCanPlace(k, a, n, x, z) {
+function facCanPlace(k, a, n, x, z, self) {
 	const F = FACS[k];
 	if (!F) return 'base';
 	if (!B.sk) return 'base';
 	const A = facAnchor(a, n);
 	const cx0 = A.ox + x, cz0 = A.oz + z, l = A.l;
+	// 動かすときは、自分がいま占めているセルを空きとみなす
+	let sk = null;
+	if (self) {
+		const SF = FACS[self.k], sc = facCell(self);
+		sk = { l: sc.l, x0: sc.x, x1: sc.x + SF.w - 1, z0: sc.z, z1: sc.z + SF.d - 1 };
+	}
+	const isSelf = (ll, xx, zz) => sk && ll === sk.l && xx >= sk.x0 && xx <= sk.x1 && zz >= sk.z0 && zz <= sk.z1;
 	if (!inBoard(cx0, cz0) || !inBoard(cx0 + F.w - 1, cz0 + F.d - 1)) return 'oob';
 	if (F.on === 'plat' && !hasLink()) return 'nolink';
 	if (F.on === 'plat' && l !== 0) return 'noplat';
 	if (F.on === 'floor' && l !== B.sk.LU) return 'noflo';
 	for (let i = 0; i < F.w; i++) for (let j = 0; j < F.d; j++) {
-		const t = B.t[gidx(l, cx0 + i, cz0 + j)];
+		const gx = cx0 + i, gz = cz0 + j;
+		const t = isSelf(l, gx, gz) ? (F.on === 'plat' ? C_PLAT : C_FLOOR) : B.t[gidx(l, gx, gz)];
 		if (F.on === 'plat') {
 			if (t !== C_PLAT) return t === C_EMPTY ? 'noplat' : 'over';
 			// 階段は真上(または真下)が駅舎の床でないと層を繋げない
-			if (B.t[gidx(B.sk.LU, cx0 + i, cz0 + j)] !== C_FLOOR) return 'noroof';
+			const up = isSelf(B.sk.LU, gx, gz) ? C_FLOOR : B.t[gidx(B.sk.LU, gx, gz)];
+			if (up !== C_FLOOR) return 'noroof';
 		} else {
 			if (t !== C_FLOOR) return t === C_EMPTY ? 'noflo' : 'over';
 		}
@@ -546,8 +555,44 @@ function facAdd(k, a, n, x, z, free) {
 		return 'cut';
 	}
 	S.money -= price;
+	facStartBuild(rec.i, FACS[k].build || 0);
 	return null;
 }
+
+// 工事の開始。終わるまでその設備は使えない
+function facStartBuild(fid, sec) {
+	const slot = laneOf(fid);
+	if (slot < 0 || !sec) return;
+	R.facBuilt[slot] = R.now + sec;
+	R.facFree[slot] = Math.max(R.facFree[slot], R.facBuilt[slot]);
+}
+// 工事の残り秒。0なら使える
+function facBuildLeft(fid) {
+	const slot = laneOf(fid);
+	if (slot < 0) return 0;
+	return Math.max(0, R.facBuilt[slot] - R.now);
+}
+
+/* 動かす。永続IDを保つので待ち行列も利用実績も引き継ぐ。
+   代金は取らないが、動かしているあいだは工期の半分だけ使えない */
+function facMove(rec, a, n, x, z) {
+	const old = { a: rec.a, n: rec.n, x: rec.x, z: rec.z };
+	// 自分を盤面から外さずに判定する。外すとレーンが解放されて
+	// 待ち行列と利用実績が消えてしまう
+	const why = facCanPlace(rec.k, a, n, x, z, rec);
+	if (why) return why;
+	rec.a = a; rec.n = n; rec.x = x; rec.z = z;
+	const st0 = walkStats();
+	const un0 = st0 ? st0.platUnreach.reduce((p, q) => p + q, 0) : 0;
+	facApply();
+	const st = walkStats();
+	const un1 = st ? st.platUnreach.reduce((p, q) => p + q, 0) : 0;
+	if (st && un1 > un0) { Object.assign(rec, old); facApply(); return 'cut'; }
+	facStartBuild(rec.i, Math.round((FACS[rec.k].build || 0) / 2));
+	return null;
+}
+
+
 
 // 撤去。返金は6割。取り消し(undo)のときだけ全額戻す
 function facRemove(rec, rate) {
@@ -1507,6 +1552,8 @@ const R = {
 	issues: [],           // ダイヤの問題(UIで赤表示)
 	missAcc: [],          // [番線×2+志向] ごとの積み残し発生本数(満足度計算用)
 	facFree: new Float64Array(64),   // レーンごとに空く時刻(索引は FACR.lane が配る slot)
+	facBuilt: new Float64Array(64),  // 工事が終わる時刻。これ以前は使えない
+	facUse: new Float64Array(64),    // 今日その設備を通った人数(表示用)
 	platCount: [],        // ホーム上の人数(混雑計算用)
 	concCount: 0,
 	satSum: 0, satN: 0,
@@ -3057,16 +3104,20 @@ function facRebindRuntime() {
 	for (const [fid, slot] of FACR.lane) {
 		if (live.has(fid)) continue;
 		FACR.lane.delete(fid); FACR.freeSlots.push(slot);
-		R.facFree[slot] = 0;
+		R.facFree[slot] = 0; R.facBuilt[slot] = 0; R.facUse[slot] = 0;
 	}
 	// 新しい設備にレーンを配る
 	for (const fid of live) {
 		if (FACR.lane.has(fid)) continue;
 		const slot = FACR.freeSlots.length ? FACR.freeSlots.pop() : FACR.nSlot++;
 		if (slot >= R.facFree.length) {
-			const a = new Float64Array(R.facFree.length * 2); a.set(R.facFree); R.facFree = a;
+			const n = R.facFree.length * 2;
+			const a = new Float64Array(n); a.set(R.facFree); R.facFree = a;
+			const b = new Float64Array(n); b.set(R.facBuilt); R.facBuilt = b;
+			const c = new Float64Array(n); c.set(R.facUse); R.facUse = c;
 		}
 		R.facFree[slot] = R.now;                  // 新設は「いま空いている」
+		R.facUse[slot] = 0;
 		FACR.lane.set(fid, slot);
 	}
 }
@@ -3078,7 +3129,7 @@ function pickStair(plat) {
 	for (const fid of list) {
 		const slot = laneOf(fid);
 		if (slot < 0) continue;
-		const eta = Math.max(R.facFree[slot], R.now) + facHeadway(fid);
+		const eta = Math.max(R.facFree[slot], R.now, R.facBuilt[slot]) + facHeadway(fid);
 		if (eta < bt) { bt = eta; best = fid; }
 	}
 	return best;
@@ -3089,7 +3140,7 @@ function pickGate() {
 	for (const fid of (WK.gateFid || [])) {
 		const slot = laneOf(fid);
 		if (slot < 0) continue;
-		const eta = Math.max(R.facFree[slot], R.now) + facHeadway(fid);
+		const eta = Math.max(R.facFree[slot], R.now, R.facBuilt[slot]) + facHeadway(fid);
 		if (eta < bt) { bt = eta; best = fid; }
 	}
 	return best;
@@ -3290,9 +3341,10 @@ function updatePax(dt) {
 			hw *= R.paxScale;
 			// 構内踏切は列車が抜けるまで開かない
 			const open = node.res === 'cross' ? R.crossOpenAt : 0;
-			const start = Math.max(pool[idx], R.now, open);
+			const start = Math.max(pool[idx], R.now, open, R.facBuilt[idx]);
 			pool[idx] = start + hw;
 			R.resN[node.res] = (R.resN[node.res] || 0) + 1;   // Stage3の検証用
+			R.facUse[idx] += R.paxScale;                     // 表示用の利用人数
 			p.gotRes = true;
 			p.until = start;
 			// 自分の前に何人いるか。詳細モードでは実際にその人数ぶん後ろに並ぶ
@@ -3725,6 +3777,7 @@ function endOfDay() {
 
 	S.day++;
 	S.todayPax = 0; S.todayRev = 0; S.todayRun = 0;
+	R.facUse.fill(0);
 	R.satSum = 0; R.satN = 0;
 	R.missAcc = new Array(Math.max(1, S.nTrack) * 2).fill(0);
 	// S.t が巻き戻るのでスジのカーソルを先頭に戻す
@@ -4048,6 +4101,8 @@ const PLAN = {
 	pinch: null,
 	drag: null,
 	tool: 0,          // 選んでいる道具(PLAN_TOOLS の添字)
+	sel: null,        // 選んでいる設備
+	moving: false,    // 動かす先を待っている
 	ghost: null,      // 置こうとしている場所
 	undo: [],         // 取り消し(深さ20)
 	ng: null, ngAt: 0,
@@ -4228,7 +4283,9 @@ function renderPlanTools() {
 			+ (F ? '<i>' + yen(price) + '</i>' : '');
 		if (PLAN.tool === i) b.className = 'on';
 		if (F && S.money < price) b.classList.add('poor');
-		b.onclick = () => { PLAN.tool = i; PLAN.ghost = null; renderPlanTools(); planDraw(); };
+		b.onclick = () => { PLAN.tool = i; PLAN.ghost = null; PLAN.moving = false;
+			if (t.id !== 'pan') PLAN.sel = null;
+			renderPlanTools(); renderPlanSel(); planDraw(); };
 		el.appendChild(b);
 	});
 	const u = document.getElementById('planUndo');
@@ -4247,7 +4304,26 @@ function planNG(msg) {
 // 指を離したときに1回だけ実行する
 function planCommit(px, py) {
 	const t = planTool();
-	if (t.id === 'pan') return;
+	const c0 = planPxToCell(px, py - CUR_LIFT);
+	// 動かす先を指定しているところ
+	if (PLAN.moving && PLAN.sel) {
+		const F = FACS[PLAN.sel.k];
+		const cc = { x: c0.x - ((F.w - 1) >> 1), z: c0.z - ((F.d - 1) >> 1) };
+		const A = planAnchorOf(cc.x, cc.z);
+		const why = facMove(PLAN.sel, A.a, A.n, A.x, A.z);
+		if (why) { planNG(NG_TEXT[why] || why); return; }
+		PLAN.moving = false;
+		planNG(F.name + 'を動かした(工事 ' + Math.ceil(facBuildLeft(PLAN.sel.i)) + '秒)');
+		renderPlanTools(); renderPlanHead(); renderPlanSel(); planDraw();
+		return;
+	}
+	// パンの道具なら設備を選ぶ
+	if (t.id === 'pan') {
+		PLAN.sel = facAt(PLAN.lay, c0.x, c0.z);
+		PLAN.moving = false;
+		renderPlanSel(); planDraw();
+		return;
+	}
 	const c = planCursorCell(px, py);
 	if (t.id === 'del') {
 		const rec = facAt(PLAN.lay, c.x, c.z);
@@ -4267,6 +4343,45 @@ function planCommit(px, py) {
 	if (PLAN.undo.length > 20) PLAN.undo.shift();
 	planNG(FACS[k].name + 'を設置 −' + yen(facPrice(k, A.a === 1 ? A.n : 0)));
 	renderPlanTools(); renderPlanHead(); planDraw();
+}
+
+/* 設備を選んだときの内訳。どこが詰まっているかを見せる */
+function renderPlanSel() {
+	const el = document.getElementById('planSel');
+	if (!el) return;
+	const rec = PLAN.sel && S.fac.indexOf(PLAN.sel) >= 0 ? PLAN.sel : null;
+	PLAN.sel = rec;
+	el.hidden = !rec;
+	if (!rec) return;
+	const F = FACS[rec.k], slot = laneOf(rec.i);
+	const left = facBuildLeft(rec.i);
+	const wait = slot >= 0 ? Math.max(0, R.facFree[slot] - R.now) : 0;
+	const use = slot >= 0 ? Math.round(R.facUse[slot]) : 0;
+	const back = Math.round(facPrice(rec.k, rec.a === 1 ? rec.n : 0) * FAC_REFUND);
+	el.innerHTML =
+		'<div class="t"><b>' + planIcon(rec.k) + ' ' + F.name + '</b> #' + rec.i
+		+ '<span>' + (rec.a === 1 ? 'ホーム' + (rec.n + 1) : '駅舎') + '</span>'
+		+ (left > 0 ? '<i>工事中 残' + Math.ceil(left) + '秒</i>' : '') + '</div>'
+		+ '<div class="s">今日の利用 ' + use.toLocaleString() + '人 · いま待ち ' + wait.toFixed(1) + '秒</div>';
+	const bm = document.createElement('button');
+	bm.textContent = PLAN.moving ? '↔ 置く場所をタップ' : '↔ 動かす';
+	if (PLAN.moving) bm.className = 'on';
+	bm.onclick = () => { PLAN.moving = !PLAN.moving; renderPlanSel(); planDraw(); };
+	const bd = document.createElement('button');
+	bd.className = 'del';
+	bd.textContent = '🗑 撤去 +' + yen(back);
+	bd.onclick = () => {
+		const name = F.name;
+		PLAN.undo.push({ del: Object.assign({}, rec) });
+		facRemove(rec);
+		PLAN.sel = null; PLAN.moving = false;
+		planNG(name + 'を撤去 +' + yen(back));
+		renderPlanTools(); renderPlanHead(); renderPlanSel(); planDraw();
+	};
+	const row = document.createElement('div');
+	row.className = 'b';
+	row.appendChild(bm); row.appendChild(bd);
+	el.appendChild(row);
 }
 
 function planUndo() {
@@ -4303,6 +4418,13 @@ function planOverlay(g) {
 		} else {
 			g.strokeStyle = '#fff'; g.lineWidth = 2;
 			g.strokeRect((gh.x - PLAN.ox) * s + 1, (gh.z - PLAN.oz) * s + 1, s - 2, s - 2);
+		}
+	}
+	if (PLAN.sel && S.fac.indexOf(PLAN.sel) >= 0 && !PLAN.sel.off) {
+		const F = FACS[PLAN.sel.k], c = facCell(PLAN.sel);
+		if (c.l === PLAN.lay) {
+			g.strokeStyle = PLAN.moving ? '#e0b040' : '#7ee0a0'; g.lineWidth = 3;
+			g.strokeRect((c.x - PLAN.ox) * s - 1, (c.z - PLAN.oz) * s - 1, F.w * s + 2, F.d * s + 2);
 		}
 	}
 	if (PLAN.ng && Date.now() - PLAN.ngAt < 2000) {
@@ -4407,7 +4529,8 @@ function openPlan() {
 	if (!PLAN.cv) initPlanCanvas();
 	PLAN.lay = hasLink() ? 1 : 0;
 	PLAN.tool = 0; PLAN.undo.length = 0; PLAN.ghost = null; PLAN.ng = null;
-	planResize(); planFit(); renderPlanTools(); renderPlanHead(); planDraw();
+	PLAN.sel = null; PLAN.moving = false;
+	planResize(); planFit(); renderPlanTools(); renderPlanHead(); renderPlanSel(); planDraw();
 }
 
 function closePlan() {

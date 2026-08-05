@@ -123,6 +123,23 @@ html, body {
 }
 #planLegend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 3px; vertical-align: -1px; }
 
+#planSel {
+	flex: none; padding: 8px 10px; background: rgba(20,28,40,.98);
+	border-top: 1px solid rgba(255,255,255,.08);
+}
+#planSel .t { display: flex; align-items: baseline; gap: 6px; font-size: 13px; }
+#planSel .t b { font-weight: 800; }
+#planSel .t span { font-size: 10px; opacity: .6; }
+#planSel .t i { margin-left: auto; font-style: normal; font-size: 10px; color: #e0b040; }
+#planSel .s { font-size: 10px; opacity: .7; margin-top: 2px; }
+#planSel .b { display: flex; gap: 6px; margin-top: 7px; }
+#planSel .b button {
+	flex: 1; border: none; background: rgba(255,255,255,.1); color: #e8eef7;
+	font-family: inherit; font-size: 12px; font-weight: 700; padding: 10px; border-radius: 8px; min-height: 40px;
+}
+#planSel .b button.on { background: #e0b040; color: #2a1c00; }
+#planSel .b button.del { background: rgba(200,60,50,.2); color: #ff9a8a; }
+
 #planTools {
 	flex: none; display: flex; gap: 5px; overflow-x: auto; padding: 7px 8px;
 	background: rgba(11,17,27,.96); scrollbar-width: none;
