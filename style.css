@@ -123,6 +123,36 @@ html, body {
 }
 #planLegend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 3px; vertical-align: -1px; }
 
+#planTools {
+	flex: none; display: flex; gap: 5px; overflow-x: auto; padding: 7px 8px;
+	background: rgba(11,17,27,.96); scrollbar-width: none;
+}
+#planTools::-webkit-scrollbar { display: none; }
+#planTools button {
+	flex: none; width: 66px; min-height: 52px; border: none; border-radius: 9px;
+	background: rgba(255,255,255,.08); color: #cfe0f5; font-family: inherit;
+	display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+	padding: 5px 2px;
+}
+#planTools button b { font-size: 17px; font-weight: 400; line-height: 1; }
+#planTools button span { font-size: 9px; font-weight: 700; white-space: nowrap; }
+#planTools button i { font-style: normal; font-size: 9px; opacity: .65; }
+#planTools button.on { background: #2f7de0; color: #fff; }
+#planTools button.poor i { color: #ff8a7a; }
+#planTools button:active { transform: scale(.95); }
+
+#planFoot {
+	flex: none; display: flex; align-items: center; gap: 8px; padding: 0 10px 6px;
+	background: rgba(11,17,27,.96);
+}
+#planFoot button {
+	border: none; background: rgba(255,255,255,.1); color: #e8eef7;
+	font-family: inherit; font-size: 12px; font-weight: 700;
+	padding: 9px 14px; border-radius: 8px; min-height: 40px;
+}
+#planFoot button:disabled { opacity: .35; }
+#planMoney { margin-left: auto; font-size: 14px; font-weight: 800; color: #7ee0a0; font-variant-numeric: tabular-nums; }
+
 /* ===== ダイヤシート ===== */
 #diaSheet {
 	position: fixed; left: 0; right: 0; bottom: 0; z-index: 21;

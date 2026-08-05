@@ -333,11 +333,58 @@ function facCell(r) {
 	return { l: A.l, x: A.ox + r.x, z: A.oz + r.z };
 }
 
+/* その位置の下地が正しいか。盤面を焼いている途中でも使うので、
+   既に置かれた設備のセル(改札や店)は「別の設備がある」として弾かれる */
+function facBaseOK(k, l, x, z) {
+	const F = FACS[k];
+	if (!inBoard(x, z) || !inBoard(x + F.w - 1, z + F.d - 1)) return false;
+	for (let i = 0; i < F.w; i++) for (let j = 0; j < F.d; j++) {
+		if (F.on === 'plat') {
+			if (B.t[gidx(0, x + i, z + j)] !== C_PLAT) return false;
+			if (B.t[gidx(B.sk.LU, x + i, z + j)] !== C_FLOOR) return false;
+		} else if (B.t[gidx(l, x + i, z + j)] !== C_FLOOR) return false;
+	}
+	return true;
+}
+
+/* 骨格が変わって置けなくなった設備を、近くの空いている場所へ移す。
+   橋上化やホーム増設で駅舎が動くと、相対位置のままでは外へ出てしまう */
+function facRelocate(r) {
+	const SK = B.sk, F = FACS[r.k];
+	if (F.on === 'plat') {
+		if (!hasLink()) return false;
+		for (let p = 0; p < S.nPlat; p++) {
+			const n = (r.n + p) % S.nPlat, px = SK.px0[n];
+			for (let z = Math.max(SK.pz0, SK.fz0); z + F.d - 1 <= Math.min(SK.pz1, SK.fz1); z++) {
+				for (let x = px; x + F.w - 1 < px + SK.pw; x++) {
+					if (!facBaseOK(r.k, 0, x, z)) continue;
+					r.a = 1; r.n = n; r.x = x - px; r.z = z - SK.pz1;
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+	for (let z = SK.fz1 - 1; z >= SK.fz0 + 1; z--) {
+		for (let x = SK.fx0 + 1; x + F.w - 1 <= SK.fx1 - 1; x++) {
+			if (!facBaseOK(r.k, SK.LU, x, z)) continue;
+			r.a = 0; r.n = 0; r.x = x - SK.fx0; r.z = z - SK.pz1;
+			return true;
+		}
+	}
+	return false;
+}
+
 // 1個だけ盤面に置く。骨格に収まらなければ false(レコードは捨てず休止にする)
 function facPlaceOne(r) {
 	const F = FACS[r.k];
 	if (!F) return false;
-	const c = facCell(r);
+	let c = facCell(r);
+	// 下地が壊れていたら近くへ移す。それも駄目なら休止
+	if (!facBaseOK(r.k, c.l, c.x, c.z)) {
+		if (!facRelocate(r)) return false;
+		c = facCell(r);
+	}
 	if (!inBoard(c.x, c.z) || !inBoard(c.x + F.w - 1, c.z + F.d - 1)) return false;
 	const meta = r.k === K_STAIR || r.k === K_ESCAL ? { plat: r.n, kk: r.s || 0 }
 		: (r.k === K_GATEA || r.k === K_GATEM) ? { jj: r.s || 0 } : undefined;
@@ -422,11 +469,178 @@ function facSync() {
 // S.fac を盤面に焼く。配列の順に置く(あとのものが先のセルを上書きしうる)
 function facPlaceAll() {
 	for (const r of S.fac) r.off = facPlaceOne(r) ? 0 : 1;
+	deriveMirror();
 }
+
+/* ---- 値段 ----
+   同じ種類を増やすほど高くなる。増築ボタンで買っていたころの値段をそのまま引き継ぐ */
+function facCount(k) { let n = 0; for (const r of S.fac) if (r.k === k) n++; return n; }
+function facCountOn(k, n) { let c = 0; for (const r of S.fac) if (r.k === k && r.a === 1 && r.n === n) c++; return c; }
+
+function facPrice(k, plat) {
+	switch (k) {
+		case K_GATEA: return Math.round(1900000 * (1 + facCount(K_GATEA) * 0.006));
+		case K_GATEM: return Math.round(260000 * (1 + facCount(K_GATEM) * 0.05));
+		case K_STAIR: return Math.round(700000 * Math.pow(1.9, facCountOn(K_STAIR, plat || 0) + facCountOn(K_ESCAL, plat || 0)) * (isUnder() ? 1.5 : 1));
+		case K_ESCAL: return Math.round(facPrice(K_STAIR, plat) * 2.2);
+		case K_CONV: return Math.round(1500000 * Math.pow(1.28, facCount(K_CONV)));
+		case K_VEND: return 300000;
+	}
+	return 0;
+}
+const FAC_REFUND = 0.6;   // 撤去したときに戻る割合
+
+/* ---- 置けるか ----
+   下地が正しいこと、盤の中にあること、既にある設備と重ならないこと。
+   盤面は「最後に焼いた結果」なので、既存の設備はその種別のセルとして見える。
+   つまり下地が床/ホームであることを見れば重なりも同時に弾ける */
+const NG_TEXT = {
+	oob: '盤の外', base: 'ここには置けない', over: '別の設備がある',
+	noflo: '駅舎の床の上だけ(⇅で層を切り替え)', noplat: 'ホームの上だけ(⇅で層を切り替え)',
+	nolink: '橋上駅舎か地下道が必要', noroof: '真上に駅舎が無い',
+	money: '資金が足りない', cut: '通路を塞いでしまう', max: '上限',
+};
+
+function facCanPlace(k, a, n, x, z) {
+	const F = FACS[k];
+	if (!F) return 'base';
+	if (!B.sk) return 'base';
+	const A = facAnchor(a, n);
+	const cx0 = A.ox + x, cz0 = A.oz + z, l = A.l;
+	if (!inBoard(cx0, cz0) || !inBoard(cx0 + F.w - 1, cz0 + F.d - 1)) return 'oob';
+	if (F.on === 'plat' && !hasLink()) return 'nolink';
+	if (F.on === 'plat' && l !== 0) return 'noplat';
+	if (F.on === 'floor' && l !== B.sk.LU) return 'noflo';
+	for (let i = 0; i < F.w; i++) for (let j = 0; j < F.d; j++) {
+		const t = B.t[gidx(l, cx0 + i, cz0 + j)];
+		if (F.on === 'plat') {
+			if (t !== C_PLAT) return t === C_EMPTY ? 'noplat' : 'over';
+			// 階段は真上(または真下)が駅舎の床でないと層を繋げない
+			if (B.t[gidx(B.sk.LU, cx0 + i, cz0 + j)] !== C_FLOOR) return 'noroof';
+		} else {
+			if (t !== C_FLOOR) return t === C_EMPTY ? 'noflo' : 'over';
+		}
+	}
+	return null;
+}
+
+/* 実際に置く。置いたあとで動線が切れていないか焼き直して確かめ、
+   切れていたら元に戻す(店や壁で駅舎を分断させない) */
+function facAdd(k, a, n, x, z, free) {
+	const why = facCanPlace(k, a, n, x, z);
+	if (why) return why;
+	const price = free ? 0 : facPrice(k, a === 1 ? n : 0);
+	if (S.money < price) return 'money';
+	// 置く前の通行性を控えておく。まだ階段が1本も無い駅では最初から到達不能なので、
+	// 「0かどうか」ではなく「悪くなったかどうか」で見ないと1本目が永久に置けない
+	const st0 = walkStats();
+	const un0 = st0 ? st0.platUnreach.reduce((p, q) => p + q, 0) : 0;
+	const rec = { i: S.nextFid++, k: k, a: a, n: n, x: x, z: z };
+	S.fac.push(rec);
+	facApply();
+	const st = walkStats();
+	const un1 = st ? st.platUnreach.reduce((p, q) => p + q, 0) : 0;
+	if (st && (un1 > un0 || (st.shopFallback && !st0.shopFallback))) {
+		S.fac.pop(); S.nextFid--;
+		facApply();
+		return 'cut';
+	}
+	S.money -= price;
+	return null;
+}
+
+// 撤去。返金は6割。取り消し(undo)のときだけ全額戻す
+function facRemove(rec, rate) {
+	const i = S.fac.indexOf(rec);
+	if (i < 0) return 0;
+	S.fac.splice(i, 1);
+	const back = Math.round(facPrice(rec.k, rec.a === 1 ? rec.n : 0) * (rate === undefined ? FAC_REFUND : rate));
+	S.money += back;
+	facApply();
+	return back;
+}
+
+// その位置にある設備を探す
+function facAt(l, gx, gz) {
+	for (const r of S.fac) {
+		if (r.off) continue;
+		const F = FACS[r.k], c = facCell(r);
+		if (c.l !== l) continue;
+		if (gx >= c.x && gx < c.x + F.w && gz >= c.z && gz < c.z + F.d) return r;
+	}
+	return null;
+}
+
+/* 盤面と3Dと経路を作り直す。resetRuntimeForLayout と違って走行中の列車を消さない
+   (設備を1個置くたびに列車が消えると、ダイヤが成立しない) */
+function facApply() {
+	gridFromParams();
+	buildStation();
+	for (const p of R.pax) {
+		if (p.plat >= S.nPlat) p.plat = S.nPlat - 1;
+		if (p.state === 'waitTrain') continue;
+		p.path = p.dir === 0 ? pathOut(p) : pathIn(p);
+		p.pi = 0; p.gotRes = false; p.atRoot = 0; p.fRoot = 0; p.state = 'walk';
+	}
+	recountWaiting();
+	renderUpgrades();
+}
+
+/* 自動で空いている場所を探して置く。増築ボタンから使う。
+   プレイヤーが2Dで置くのと同じ経路を通るので、どちらで増やしても同じ形になる */
+function facAutoPlace(k) {
+	const SK = B.sk;
+	if (!SK) return 'base';
+	const F = FACS[k];
+	if (F.on === 'plat') {
+		// いちばん階段の少ないホームの、駅舎に覆われた範囲へ
+		let best = 0, bn = 1e9;
+		for (let i = 0; i < S.nPlat; i++) {
+			const c = facCountOn(K_STAIR, i) + facCountOn(K_ESCAL, i);
+			if (c < bn) { bn = c; best = i; }
+		}
+		const px0 = SK.px0[best];
+		for (let z = Math.max(SK.pz0, SK.fz0); z + F.d - 1 <= Math.min(SK.pz1, SK.fz1); z++) {
+			for (let x = px0; x + F.w - 1 < px0 + SK.pw; x++) {
+				const why = facCanPlace(k, 1, best, x - px0, z - SK.pz1);
+				if (!why) return facAdd(k, 1, best, x - px0, z - SK.pz1);
+			}
+		}
+		return 'noplat';
+	}
+	// 駅舎の中を、出口に近い側から順に探す
+	for (let z = SK.fz1 - 1; z >= SK.fz0 + 1; z--) {
+		for (let x = SK.fx0 + 1; x + F.w - 1 <= SK.fx1 - 1; x++) {
+			const why = facCanPlace(k, 0, 0, x - SK.fx0, z - SK.pz1);
+			if (!why) return facAdd(k, 0, 0, x - SK.fx0, z - SK.pz1);
+		}
+	}
+	return 'noflo';
+}
+
+/* S.fac から旧来のカウントを写す。dailyCost・運賃・増築UI が
+   S.gateA/gateM/stairs/shops/esc を読み続けられるようにするため */
+function deriveMirror() {
+	let ga = 0, gm = 0, cv = 0, st = 0, es = 0;
+	const perPlat = new Array(Math.max(1, S.nPlat)).fill(0);
+	for (const r of S.fac) {
+		if (r.off) continue;
+		if (r.k === K_GATEA) ga++;
+		else if (r.k === K_GATEM) gm++;
+		else if (r.k === K_CONV) cv++;
+		else if (r.k === K_STAIR) { st++; if (r.a === 1) perPlat[Math.min(r.n, perPlat.length - 1)]++; }
+		else if (r.k === K_ESCAL) { es++; if (r.a === 1) perPlat[Math.min(r.n, perPlat.length - 1)]++; }
+	}
+	S.gateA = ga; S.gateM = gm; S.shops = cv;
+	S.stairs = Math.max.apply(null, perPlat);
+	S.esc = es > st;                      // 半分以上がエスカレーターなら「エスカレーター化済み」扱い
+}
+
 
 function gridFromParams() {
 	gridSkeleton();
-	facSync();        // 自動レイアウト → S.fac(Stage4 でプレイヤーの配置に置き換える)
+	// 自動レイアウトは初回(と旧セーブの移行)だけ。以後は S.fac が正
+	if (!S.fac.length) facSync();
 	facPlaceAll();
 	rebuildDerived();
 	buildWalkGraph();
@@ -3613,7 +3827,7 @@ const UPGRADES = [
 		can: () => hasLink() && S.stairs < maxStairs(),
 		ng: () => !hasLink() ? '橋上駅舎か地下道が必要'
 			: (S.stairs < CFG.MAX_STAIRS ? 'ホームが短い(要延伸)' : '上限'),
-		apply: () => { S.stairs++; },
+		apply: () => { facAutoPlace(S.esc ? K_ESCAL : K_STAIR); },
 	},
 	{
 		id: 'esc', ic: '🛗', name: 'エスカレーター化',
@@ -3621,7 +3835,7 @@ const UPGRADES = [
 		cost: () => 4500000,
 		can: () => !S.esc,
 		ng: () => '導入済み',
-		apply: () => { S.esc = true; },
+		apply: () => { for (const r of S.fac) if (r.k === K_STAIR) r.k = K_ESCAL; facApply(); },
 	},
 	{
 		id: 'gateM', ic: '👮', name: '手動改札を1つ設置',
@@ -3632,7 +3846,7 @@ const UPGRADES = [
 		cost: () => 260000 * (1 + S.gateM * 0.05),
 		can: () => S.gateM < 40,
 		ng: () => '上限',
-		apply: () => { S.gateM++; },
+		apply: () => { facAutoPlace(K_GATEM); },
 	},
 	{
 		id: 'gateA', ic: '🎫', name: '自動改札を1台設置',
@@ -3642,7 +3856,7 @@ const UPGRADES = [
 		cost: () => 1900000 * (1 + S.gateA * 0.006),
 		can: () => S.gateA < 220,
 		ng: () => '上限',
-		apply: () => { S.gateA++; },
+		apply: () => { facAutoPlace(K_GATEA); },
 	},
 	{
 		id: 'line', ic: '🧭', name: '本線を増設',
@@ -3694,7 +3908,7 @@ const UPGRADES = [
 		cost: () => 1500000 * Math.pow(1.28, S.shops),
 		can: () => S.shops < 24,
 		ng: () => '上限',
-		apply: () => { S.shops++; },
+		apply: () => { facAutoPlace(K_CONV); },
 	},
 ];
 
@@ -3736,7 +3950,13 @@ function renderUpgrades() {
 			if (!u.can() || !canSpend(c)) return;
 			navigator.vibrate && navigator.vibrate(12);
 			S.money -= c;
-			u.apply();
+			const why = u.apply();
+			if (why) {                                  // 置く場所が無かった等
+				S.money += c;
+				alertOnce('noplace', '⚠ 置く場所がありません — ' + (NG_TEXT[why] || why), false, 8);
+				renderUpgrades();
+				return;
+			}
 			resetRuntimeForLayout();
 			buildStation();
 			save();
@@ -3827,6 +4047,10 @@ const PLAN = {
 	ptr: new Map(),   // pointerId → {x,y}  2本指を取りこぼさないため
 	pinch: null,
 	drag: null,
+	tool: 0,          // 選んでいる道具(PLAN_TOOLS の添字)
+	ghost: null,      // 置こうとしている場所
+	undo: [],         // 取り消し(深さ20)
+	ng: null, ngAt: 0,
 	savedSpeed: undefined,
 	dirty: true,
 };
@@ -3949,7 +4173,146 @@ function planDraw() {
 		for (let z = z0; z <= z1 + 1; z++) { const sz = Math.round((z - PLAN.oz) * s) + .5; g.moveTo(0, sz); g.lineTo(PLAN.w, sz); }
 		g.stroke();
 	}
+	planOverlay(g);
 	PLAN.dirty = false;
+}
+
+
+/* ---- 道具と配置の操作 ----
+   指の下はセルが隠れるので、カーソルは押した位置の 24pt 上に出す。
+   置く/消すは指を離したとき。動かしたときはパン扱いにする */
+const PLAN_TOOLS = [
+	{ id: 'pan', ic: '✋', name: 'パン' },
+	{ id: 'del', ic: '🗑', name: '撤去' },
+	{ k: K_GATEA }, { k: K_GATEM }, { k: K_STAIR }, { k: K_ESCAL }, { k: K_CONV }, { k: K_VEND },
+];
+const CUR_LIFT = 24;   // カーソルを指より上に出す量(pt)
+
+function planTool() { return PLAN_TOOLS[PLAN.tool] || PLAN_TOOLS[0]; }
+function planToolKind() { const t = planTool(); return t.k === undefined ? -1 : t.k; }
+
+// カーソル(=置く場所)のセル。設備は左上を合わせるので大きさのぶん戻す
+function planCursorCell(px, py) {
+	const c = planPxToCell(px, py - CUR_LIFT);
+	const k = planToolKind();
+	if (k < 0) return c;
+	const F = FACS[k];
+	return { x: c.x - ((F.w - 1) >> 1), z: c.z - ((F.d - 1) >> 1) };
+}
+
+// 盤面の絶対セル → アンカー相対。いま見ているレイヤーで決まる
+function planAnchorOf(gx, gz) {
+	const SK = B.sk;
+	if (PLAN.lay === 0 && hasLink()) {
+		// ホーム層。いちばん近いホーム面を選ぶ
+		let best = 0, bd = 1e9;
+		for (let i = 0; i < SK.px0.length; i++) {
+			const d = Math.abs(gx - (SK.px0[i] + SK.pw / 2));
+			if (d < bd) { bd = d; best = i; }
+		}
+		return { a: 1, n: best, x: gx - SK.px0[best], z: gz - SK.pz1 };
+	}
+	return { a: 0, n: 0, x: gx - SK.fx0, z: gz - SK.pz1 };
+}
+
+function renderPlanTools() {
+	const el = document.getElementById('planTools');
+	if (!el) return;
+	el.innerHTML = '';
+	PLAN_TOOLS.forEach((t, i) => {
+		const b = document.createElement('button');
+		const F = t.k === undefined ? null : FACS[t.k];
+		const price = F ? facPrice(t.k, 0) : 0;
+		b.innerHTML = '<b>' + (F ? F.ic || planIcon(t.k) : t.ic) + '</b>'
+			+ '<span>' + (F ? F.name : t.name) + '</span>'
+			+ (F ? '<i>' + yen(price) + '</i>' : '');
+		if (PLAN.tool === i) b.className = 'on';
+		if (F && S.money < price) b.classList.add('poor');
+		b.onclick = () => { PLAN.tool = i; PLAN.ghost = null; renderPlanTools(); planDraw(); };
+		el.appendChild(b);
+	});
+	const u = document.getElementById('planUndo');
+	if (u) u.disabled = !PLAN.undo.length;
+	const m = document.getElementById('planMoney');
+	if (m) m.textContent = yen(S.money);
+}
+function planIcon(k) { return ['🎫', '👮', '🪜', '🛗', '🏪', '🥤'][k] || '▪'; }
+
+function planNG(msg) {
+	PLAN.ng = msg;
+	PLAN.ngAt = Date.now();
+	planDraw();
+}
+
+// 指を離したときに1回だけ実行する
+function planCommit(px, py) {
+	const t = planTool();
+	if (t.id === 'pan') return;
+	const c = planCursorCell(px, py);
+	if (t.id === 'del') {
+		const rec = facAt(PLAN.lay, c.x, c.z);
+		if (!rec) { planNG('ここには設備が無い'); return; }
+		const kind = FACS[rec.k].name;
+		const back = facRemove(rec);
+		PLAN.undo.push({ del: Object.assign({}, rec) });
+		planNG(kind + 'を撤去 +' + yen(back));
+		renderPlanTools(); renderPlanHead(); planDraw();
+		return;
+	}
+	const k = planToolKind();
+	const A = planAnchorOf(c.x, c.z);
+	const why = facAdd(k, A.a, A.n, A.x, A.z);
+	if (why) { planNG(NG_TEXT[why] || why); return; }
+	PLAN.undo.push({ add: S.fac[S.fac.length - 1].i });
+	if (PLAN.undo.length > 20) PLAN.undo.shift();
+	planNG(FACS[k].name + 'を設置 −' + yen(facPrice(k, A.a === 1 ? A.n : 0)));
+	renderPlanTools(); renderPlanHead(); planDraw();
+}
+
+function planUndo() {
+	const u = PLAN.undo.pop();
+	if (!u) return;
+	if (u.add !== undefined) {
+		const r = S.fac.find(x => x.i === u.add);
+		if (r) { facRemove(r, 1); planNG('取り消した'); }
+	} else if (u.del) {
+		const r = u.del;
+		const why = facAdd(r.k, r.a, r.n, r.x, r.z, true);   // 戻すぶんは無料
+		planNG(why ? '戻せなかった: ' + (NG_TEXT[why] || why) : '戻した');
+	}
+	renderPlanTools(); renderPlanHead(); planDraw();
+}
+
+// ゴーストと警告を盤面の上に重ねる
+function planOverlay(g) {
+	const s = PLAN.s;
+	if (PLAN.ghost) {
+		const k = planToolKind();
+		const gh = PLAN.ghost;
+		if (k >= 0) {
+			const F = FACS[k];
+			const A = planAnchorOf(gh.x, gh.z);
+			const why = facCanPlace(k, A.a, A.n, A.x, A.z);
+			const money = S.money >= facPrice(k, A.a === 1 ? A.n : 0);
+			g.globalAlpha = 0.75;
+			g.fillStyle = (!why && money) ? PLAN_COL[F.cell] : '#c8503c';
+			g.fillRect((gh.x - PLAN.ox) * s, (gh.z - PLAN.oz) * s, F.w * s, F.d * s);
+			g.globalAlpha = 1;
+			g.strokeStyle = '#fff'; g.lineWidth = 2;
+			g.strokeRect((gh.x - PLAN.ox) * s + 1, (gh.z - PLAN.oz) * s + 1, F.w * s - 2, F.d * s - 2);
+		} else {
+			g.strokeStyle = '#fff'; g.lineWidth = 2;
+			g.strokeRect((gh.x - PLAN.ox) * s + 1, (gh.z - PLAN.oz) * s + 1, s - 2, s - 2);
+		}
+	}
+	if (PLAN.ng && Date.now() - PLAN.ngAt < 2000) {
+		g.font = 'bold 13px system-ui, sans-serif';
+		const w = g.measureText(PLAN.ng).width + 20;
+		g.fillStyle = 'rgba(20,26,36,.92)';
+		g.fillRect((PLAN.w - w) / 2, 12, w, 30);
+		g.fillStyle = '#e8eef7'; g.textAlign = 'center'; g.textBaseline = 'middle';
+		g.fillText(PLAN.ng, PLAN.w / 2, 27);
+	}
 }
 
 function initPlanCanvas() {
@@ -3966,7 +4329,10 @@ function initPlanCanvas() {
 			PLAN.pinch = { d0: Math.hypot(v[0].x - v[1].x, v[0].y - v[1].y) || 1, s0: PLAN.s };
 			PLAN.drag = null;
 		} else if (PLAN.ptr.size === 1) {
-			PLAN.drag = Object.assign({}, local(e));
+			const p = local(e);
+			PLAN.drag = Object.assign({}, p);
+			PLAN.down = { x: p.x, y: p.y, moved: 0 };
+			if (planTool().id !== 'pan') { PLAN.ghost = planCursorCell(p.x, p.y); planDraw(); }
 		}
 	});
 
@@ -3985,8 +4351,15 @@ function initPlanCanvas() {
 			PLAN.dirty = true;
 		} else if (PLAN.drag) {
 			const p = local(e);
-			PLAN.ox -= (p.x - PLAN.drag.x) / PLAN.s;
-			PLAN.oz -= (p.y - PLAN.drag.y) / PLAN.s;
+			if (PLAN.down) PLAN.down.moved += Math.abs(p.x - PLAN.drag.x) + Math.abs(p.y - PLAN.drag.y);
+			if (planTool().id === 'pan' || (PLAN.down && PLAN.down.moved > 14)) {
+				// 道具を持っていても大きく動かしたらパン(指1本で両方できるようにする)
+				PLAN.ox -= (p.x - PLAN.drag.x) / PLAN.s;
+				PLAN.oz -= (p.y - PLAN.drag.y) / PLAN.s;
+				PLAN.ghost = null;
+			} else {
+				PLAN.ghost = planCursorCell(p.x, p.y);
+			}
 			PLAN.drag = p;
 			PLAN.dirty = true;
 		}
@@ -3994,7 +4367,12 @@ function initPlanCanvas() {
 	});
 
 	const up = e => {
+		const was = PLAN.ptr.get(e.pointerId);
 		PLAN.ptr.delete(e.pointerId);
+		if (was && PLAN.ptr.size === 0 && PLAN.down && PLAN.down.moved <= 14 && !PLAN.pinch) {
+			planCommit(was.x, was.y);
+		}
+		if (PLAN.ptr.size === 0) { PLAN.down = null; PLAN.ghost = null; PLAN.dirty = true; planDraw(); }
 		if (PLAN.ptr.size < 2) PLAN.pinch = null;
 		if (PLAN.ptr.size === 0) PLAN.drag = null;
 		else PLAN.drag = Array.from(PLAN.ptr.values())[0];   // 指が1本残ったらそこからパンを続ける
@@ -4028,7 +4406,8 @@ function openPlan() {
 	document.querySelectorAll('#speed button').forEach(x => x.classList.toggle('active', +x.dataset.speed === 0));
 	if (!PLAN.cv) initPlanCanvas();
 	PLAN.lay = hasLink() ? 1 : 0;
-	planResize(); planFit(); renderPlanHead(); planDraw();
+	PLAN.tool = 0; PLAN.undo.length = 0; PLAN.ghost = null; PLAN.ng = null;
+	planResize(); planFit(); renderPlanTools(); renderPlanHead(); planDraw();
 }
 
 function closePlan() {
@@ -4048,6 +4427,7 @@ function initPlanUI() {
 		planFit(); renderPlanHead(); planDraw();
 	};
 	document.getElementById('planFit').onclick = () => { planFit(); renderPlanHead(); planDraw(); };
+	document.getElementById('planUndo').onclick = planUndo;
 	window.addEventListener('resize', () => { if (PLAN.open) { planResize(); planFit(); planDraw(); } });
 }
 
@@ -5043,7 +5423,9 @@ function boot() {
 			const c = Math.round(u.cost());
 			if (S.money < c) return false;
 			S.money -= c;
-			u.apply(); resetRuntimeForLayout(); buildStation(); renderUpgrades();
+			const why = u.apply();
+			if (why) { S.money += c; return why; }      // 置けなかったら代金は取らない
+			resetRuntimeForLayout(); buildStation(); renderUpgrades();
 			return true;
 		},
 	};
