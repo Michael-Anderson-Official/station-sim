@@ -238,63 +238,105 @@ function bldFit() {
 	}
 }
 
-function gridSkeleton() {
-	boardAlloc();
-	recalcGeometry();
-	bldFit();
-	const LU = hasLink() ? 1 : 0;                              // 駅舎のレイヤー
-	const pw = Math.max(3, Math.round(S.platW / GRID.CELL));   // ホーム幅(マス)
-	const unit = pw + 4;                                       // ホーム + 両側の線路
-	const startX = GRID.OX - Math.floor(S.nPlat * unit / 2);
-	const plen = S.cars * CAR_CELLS;                           // ホーム長(マス)
-	const pz0 = GRID.OZ - Math.floor(plen / 2), pz1 = pz0 + plen - 1;
-
-	G.gx = [];   // 番線 → 左レールのx
-	const px0 = [];   // ホーム面 → 西端のx
-	for (let i = 0; i < S.nPlat; i++) {
-		const x0 = startX + i * unit + 2;                      // ホームの左端
-		px0.push(x0);
-		fillRect(0, x0, x0 + pw - 1, pz0, pz1, C_PLAT);
-		for (let x = x0; x < x0 + pw; x++) {
-			for (let z = pz0; z <= pz1; z++) B.f[gidx(0, x, z)] |= F_ROOF;
-		}
-		// ホームの両脇に線路。盤の端から端まで通す(外へ繋がっている扱い)
-		for (const side of [0, 1]) {
-			const t = i * 2 + side;
-			if (t >= S.nTrack) continue;
-			const rx = side ? x0 + pw : x0 - 2;
-			fillRect(0, rx, rx, 0, GRID.D - 1, C_RAIL_L);
-			fillRect(0, rx + 1, rx + 1, 0, GRID.D - 1, C_RAIL_R);
-			G.gx[t] = rx;
-		}
+/* ---- 線路とホームを盤面に敷く ----
+   どちらもユーザーが置いたもの(S.rail / S.plat)がそのまま正 */
+function layTrackAndPlat() {
+	// 線路は左レールの列。盤の端から端まで通す(外へ繋がっている扱い)
+	for (const c of S.rail) {
+		if (!inBoard(c.x, 0) || !inBoard(c.x + 1, 0)) continue;
+		fillRect(0, c.x, c.x, 0, GRID.D - 1, C_RAIL_L);
+		fillRect(0, c.x + 1, c.x + 1, 0, GRID.D - 1, C_RAIL_R);
 	}
+	// ホームは1マスずつ。線路の上には書かない
+	for (const c of S.plat) {
+		if (!inBoard(c.x, c.z)) continue;
+		const k = gidx(0, c.x, c.z);
+		if (B.t[k] !== C_EMPTY) continue;
+		B.t[k] = C_PLAT;
+		B.f[k] |= F_ROOF;
+	}
+}
 
-	/* 駅舎。橋上/地下はホーム北端にまたがり、地平は線路の外側に建つ。
-	   大きさは S.bldN/bldD/bldW(マス)が持つ。fx0 と pz1 はどの拡張でも動かないので、
-	   設備の相対位置の基準点になる */
-	const allX0 = startX, allX1 = startX + S.nPlat * unit - 1;
+/* ---- 駅舎(橋上/地下)と出入口 ----
+   幾何が決まったあとに敷く。地平駅は駅舎を建てない */
+function layStructure() {
+	const LU = hasLink() ? 1 : 0;
+	bldFit();
 	let fx0, fx1, fz0, fz1;
+	const px0 = DV.plats.length ? DV.plats[0].x0 : GRID.OX - 1;
+	const px1 = DV.plats.length ? DV.plats[DV.plats.length - 1].x1 : GRID.OX + 1;
+	let pz0 = GRID.OZ - 1, pz1 = GRID.OZ + 1;
+	if (DV.plats.length) {
+		pz0 = Math.min.apply(null, DV.plats.map(p => p.z0));
+		pz1 = Math.max.apply(null, DV.plats.map(p => p.z1));
+	}
 	if (hasLink()) {
-		fx0 = allX0 - 1; fx1 = allX1 + 1 + S.bldW;   // 東へ広がる
-		fz0 = pz1 - S.bldN;                          // 北(ホーム側)へ張り出す
-		fz1 = pz1 + S.bldD;                          // 南(出口側)へ伸びる
-		fx1 = Math.min(GRID.W - 2, fx1); fz1 = Math.min(GRID.D - 3, fz1);
+		fx0 = px0 - 1; fx1 = px1 + 1 + S.bldW;
+		fz0 = pz1 - S.bldN;
+		fz1 = pz1 + S.bldD;
+		fx0 = Math.max(1, fx0); fx1 = Math.min(GRID.W - 2, fx1);
+		fz0 = Math.max(1, fz0); fz1 = Math.min(GRID.D - 3, fz1);
 		fillRect(LU, fx0, fx1, fz0, fz1, C_FLOOR);
 		fillRect(LU, fx0 + 1, fx1 - 1, fz1, fz1 + 1, C_ENTRANCE);
 	} else {
-		/* 田舎の小さな地平駅。駅舎も構内踏切も無い。
-		   改札はホームに直接付き、ホーム端の階段を下りるとそこが駅前 */
-		fx0 = px0[0]; fx1 = px0[S.nPlat - 1] + pw - 1;
+		// 田舎の地平駅。ホーム端から地面へ下りるとそこが駅前
+		fx0 = px0; fx1 = px1;
 		fz0 = pz0; fz1 = pz1;
 		const ez = Math.min(GRID.D - 5, pz1 + 1);
-		fillRect(0, fx0, fx1, ez, ez + 1, C_FLOOR);        // ホーム端から地面へ下りる所
-		fillRect(0, fx0, fx1, ez + 2, ez + 3, C_ENTRANCE);  // 駅前
+		fillRect(0, fx0, fx1, ez, ez + 1, C_FLOOR);
+		fillRect(0, fx0, fx1, ez + 2, ez + 3, C_ENTRANCE);
 	}
+	B.sk = { LU: LU, pw: Math.max(1, px1 - px0 + 1), unit: 0, startX: px0, plen: pz1 - pz0 + 1,
+		pz0: pz0, pz1: pz1, px0: DV.plats.map(p => p.x0), fx0: fx0, fx1: fx1, fz0: fz0, fz1: fz1 };
+}
 
-	/* 骨格の寸法。設備の位置はここからの相対で決まるので、
-	   fx0(西端)と pz1(ホーム南端)は「どの増築でも動かない基準点」として扱う */
-	B.sk = { LU: LU, pw: pw, unit: unit, startX: startX, plen: plen,
-		pz0: pz0, pz1: pz1, px0: px0, fx0: fx0, fx1: fx1, fz0: fz0, fz1: fz1 };
+/* 測定値を S へ写す。有効長・面数・線数はもう「置かれた結果」 */
+function deriveLayout() {
+	S.nPlat = Math.max(1, DV.plats.length);
+	S.nTrack = Math.max(1, DV.tracks.length);
+	S.cars = Math.max(CFG.CARS_MIN, Math.min(CFG.CARS_MAX, G.cars));
+	if (DV.plats.length) S.platW = platWOf(0);
+}
+
+/* 旧セーブ(nPlat/nTrack/cars/platW)から線路とホームを起こす。
+   移行した瞬間の見た目が変わらないよう、これまでの配置式をそのまま使う */
+function migrateLayout() {
+	const pw = Math.max(3, Math.round(S.platW / GRID.CELL));
+	const unit = pw + 4;
+	const startX = GRID.OX - Math.floor(S.nPlat * unit / 2);
+	const plen = S.cars * CAR_CELLS;
+	const pz0 = GRID.OZ - Math.floor(plen / 2), pz1 = pz0 + plen - 1;
+	for (let i = 0; i < S.nPlat; i++) {
+		const x0 = startX + i * unit + 2;
+		for (let x = x0; x < x0 + pw; x++) {
+			for (let z = pz0; z <= pz1; z++) S.plat.push({ x: x, z: z });
+		}
+		for (const side of [0, 1]) {
+			if (i * 2 + side >= S.nTrack) continue;
+			S.rail.push({ x: side ? x0 + pw : x0 - 2 });
+		}
+	}
+	S.rail.sort((a, b) => a.x - b.x);
+}
+
+/* 開業時の姿。線路が1本あるだけで、ホームも何も無い */
+function startingLayout() {
+	S.rail = [{ x: GRID.OX - 1 }];
+	S.plat = [];
+	S.fac = []; S.nextFid = 1;
+}
+
+function gridFromParams() {
+	boardAlloc();
+	layTrackAndPlat();
+	rebuildDerived();          // 線路の検出とホームの成分
+	recalcGeometry();          // 幾何は盤面から
+	deriveLayout();            // 面数・線数・有効長は測定値
+	layStructure();            // 駅舎と出入口
+	if (!S.fac.length) facSync();
+	facPlaceAll();
+	buildWalkGraph();
+	facRebindRuntime();
 }
 
 /* ================= 設備 =================
@@ -683,16 +725,6 @@ function deriveMirror() {
 	S.esc = es > st;                      // 半分以上がエスカレーターなら「エスカレーター化済み」扱い
 }
 
-
-function gridFromParams() {
-	gridSkeleton();
-	// 自動レイアウトは初回(と旧セーブの移行)だけ。以後は S.fac が正
-	if (!S.fac.length) facSync();
-	facPlaceAll();
-	rebuildDerived();
-	buildWalkGraph();
-	facRebindRuntime();   // 待ち行列を永続IDで引き継ぐ      // Stage3: 盤面から歩行グラフと距離場を起こす(無効化点はここだけ)
-}
 
 /* ---- 盤面から派生値を作る。recalcGeometry() のグリッド版 ----
    番線は「RAIL_L/RAIL_R のペアがZ方向に連なる区間」として検出する。
@@ -1336,6 +1368,8 @@ function rebuildDerived() {
 	DV.tracks = live;
 	DV.byTid = new Map(live.map(r => [r.tid, r]));
 	DV.all = tracks;
+	DV.plats = findPlats();      // ホームの連結成分(矩形とは限らない)
+	linkTracksToPlats();         // 番線 → 面しているホームと向き
 	DV.ver++;
 	return DV;
 }
@@ -1519,6 +1553,9 @@ function defaultState() {
 		bldN: 0, bldD: 0, bldW: 0,
 		// 置いた設備。[{i:永続ID, k:種別, a:アンカー(0=駅舎/1=ホーム), n:ホーム面, x,z:相対マス}]
 		fac: [], nextFid: 1,
+		// 線路とホームはユーザーが置く。これが盤面の正
+		rail: [],             // 左レールの列 [{x}]。盤の端から端まで通る
+		plat: [],             // ホームのマス [{x,z}]
 		shops: 0,             // 駅ナカ店舗
 		// 駅周辺の開発。これが乗客の源。開業時は小さな住宅地が1つあるだけ
 		devs: { home1: 1 },
@@ -1565,23 +1602,92 @@ const R = {
 	lastAlert: {},
 };
 
-/* ================= 幾何 ================= */
+/* ================= 幾何 =================
+   すべて盤面から導く。ホームも線路もユーザーが置くので、
+   「何面何線」「何両」はパラメータではなく、置かれた結果の測定値になる */
 const G = {};
+
+/* ホームの連結成分を数える。ユーザーが自由に塗るので矩形とは限らない */
+function findPlats() {
+	const seen = new Uint8Array(GRID.W * GRID.D);
+	const out = [];
+	const q = new Int32Array(GRID.W * GRID.D);
+	for (let x = 0; x < GRID.W; x++) for (let z = 0; z < GRID.D; z++) {
+		if (seen[x * GRID.D + z] || tAt(0, x, z) !== C_PLAT) continue;
+		let h = 0, t = 0;
+		q[t++] = x * GRID.D + z; seen[x * GRID.D + z] = 1;
+		let x0 = x, x1 = x, z0 = z, z1 = z, n = 0;
+		while (h < t) {
+			const k = q[h++], px = (k / GRID.D) | 0, pz = k - px * GRID.D;
+			n++;
+			if (px < x0) x0 = px; if (px > x1) x1 = px;
+			if (pz < z0) z0 = pz; if (pz > z1) z1 = pz;
+			const push = (a, b) => {
+				if (!inBoard(a, b) || seen[a * GRID.D + b] || tAt(0, a, b) !== C_PLAT) return;
+				seen[a * GRID.D + b] = 1; q[t++] = a * GRID.D + b;
+			};
+			push(px + 1, pz); push(px - 1, pz); push(px, pz + 1); push(px, pz - 1);
+		}
+		out.push({ x0: x0, x1: x1, z0: z0, z1: z1, n: n });
+	}
+	out.sort((a, b) => (a.x0 + a.x1) - (b.x0 + b.x1));
+	return out;
+}
+
+/* 番線 → 面している ホーム成分 と 向き を決める */
+function linkTracksToPlats() {
+	for (const r of DV.tracks) {
+		r.plat = -1; r.side = -1;
+		const zc = r.adjZ1 >= 0 ? r.adjZ1 : Math.round((r.z0 + r.z1) / 2);
+		for (const side of [-1, 1]) {
+			const x = side < 0 ? r.x - 1 : r.x + 2;
+			if (tAt(0, x, zc) !== C_PLAT) continue;
+			const i = DV.plats.findIndex(p => x >= p.x0 && x <= p.x1 && zc >= p.z0 && zc <= p.z1);
+			if (i >= 0) { r.plat = i; r.side = side; break; }
+		}
+	}
+}
+
+// ホーム成分 i の中心x(ワールド)
+function platX(i) {
+	const p = DV.plats[Math.max(0, Math.min(DV.plats.length - 1, i))];
+	return p ? (wx(p.x0) + wx(p.x1)) / 2 : 0;
+}
+// ホーム成分 i の幅(m)
+function platWOf(i) {
+	const p = DV.plats[Math.max(0, Math.min(DV.plats.length - 1, i))];
+	return p ? (p.x1 - p.x0 + 1) * GRID.CELL : S.platW;
+}
+function trackPlat(t) { const r = DV.tracks[t]; return r && r.plat >= 0 ? r.plat : 0; }
+function trackSide(t) { const r = DV.tracks[t]; return r && r.side ? r.side : -1; }
+// 線路の中心x(ワールド)。2マス幅なので左レールの中心+1マス
+function trackX(t) {
+	const r = DV.tracks[t];
+	return r ? wx(r.x) + GRID.CELL / 2 : 0;
+}
+
 function recalcGeometry() {
-	G.unitW = S.platW + 2 * CFG.TRACK_W + 1.4;
-	// ホーム長は編成長に追従する
-	G.platLen = S.cars * CFG.CAR_LEN;
-	G.platZ0 = -G.platLen / 2;
-	G.platZ1 = G.platLen / 2;
-	// 駅舎の大きさは駅の規模に合わせる。小駅に巨大な橋上駅舎が載らないように
+	// ホームの広がりを盤面から測る
+	let z0 = Infinity, z1 = -Infinity, cells = 0;
+	for (const p of DV.plats) { if (p.z0 < z0) z0 = p.z0; if (p.z1 > z1) z1 = p.z1; cells += p.n; }
+	if (!DV.plats.length) { z0 = GRID.OZ - 5; z1 = GRID.OZ + 5; }
+	G.platZ0 = wz(z0) - GRID.CELL / 2;
+	G.platZ1 = wz(z1) + GRID.CELL / 2;
+	G.platLen = Math.max(GRID.CELL, G.platZ1 - G.platZ0);
+	G.platArea = Math.max(GRID.CELL * GRID.CELL, cells * GRID.CELL * GRID.CELL);
+	G.unitW = (DV.plats.length ? platWOf(0) : S.platW) + 2 * CFG.TRACK_W + 1.4;
+
+	// 着けられる編成長は「線路がホームに接している一番長い区間」で決まる
+	let best = 0;
+	for (const r of DV.tracks) best = Math.max(best, r.cars || 0);
+	G.cars = Math.max(1, best);
+
 	G.concD = Math.max(20, Math.min(92, 12 + gateCount() * 0.9 + G.platLen * 0.10));
 	if (hasLink()) {
-		// 橋上/地下: ホームの北端にまたがり、乗客は階段で上り下りする
 		G.entryY = isBridge() ? CFG.CONC_Y : -CFG.UNDER_Y;
 		G.over = Math.min(G.concD * 0.55, Math.max(10, G.platLen * 0.32));
 		G.concZ0 = G.platZ1 - G.over;
 	} else {
-		// 地平駅: ホームの先の地上に駅舎があり、そのまま歩いて入れる
 		G.entryY = 0;
 		G.over = 0;
 		G.concD = Math.max(16, Math.min(46, 12 + gateCount() * 1.4));
@@ -1590,26 +1696,23 @@ function recalcGeometry() {
 	G.concZ1 = G.concZ0 + G.concD;
 	G.gateZ = hasLink() ? G.concZ1 - Math.min(18, G.concD * 0.34) : G.concZ0 + Math.min(9, G.concD * 0.42);
 	G.exitZ = G.concZ1 + 8;
-	if (hasLink()) {
-		G.concX0 = platX(0) - G.unitW / 2 - 7 - S.concW;
-		G.concX1 = platX(S.nPlat - 1) + G.unitW / 2 + 7 + S.concW;
+	if (hasLink() && DV.plats.length) {
+		G.concX0 = wx(DV.plats[0].x0) - GRID.CELL / 2 - 7 - S.concW;
+		G.concX1 = wx(DV.plats[DV.plats.length - 1].x1) + GRID.CELL / 2 + 7 + S.concW;
 	} else {
-		// 駅舎は線路をまたげないので、いちばん東の線路より外に建てる
 		let railE = -Infinity;
-		for (let t = 0; t < S.nTrack; t++) railE = Math.max(railE, trackX(t) + CFG.TRACK_W / 2);
+		for (let t = 0; t < DV.tracks.length; t++) railE = Math.max(railE, trackX(t) + CFG.TRACK_W / 2);
+		if (!isFinite(railE)) railE = 0;
 		G.concX0 = railE + 2.5;
 		G.concX1 = G.concX0 + Math.max(15, 9 + gateCount() * 2.2 + S.concW * 2);
 	}
 	G.concCx = (G.concX0 + G.concX1) / 2;
 	G.concArea = (G.concX1 - G.concX0) * G.concD;
-	G.platArea = S.platW * G.platLen;
-	G.trainCap = S.cars * CFG.CAR_CAP;
-	G.doorFlow = S.cars * CFG.CAR_FLOW;
-	G.nDoors = Math.max(2, S.cars * 2);
-	// 階段はコンコースに覆われた範囲に収める
+	G.trainCap = G.cars * CFG.CAR_CAP;
+	G.doorFlow = G.cars * CFG.CAR_FLOW;
+	G.nDoors = Math.max(2, G.cars * 2);
 	G.stairA = G.concZ0 + 4;
 	G.stairB = G.platZ1 - 4;
-	// 地平駅で線路を渡る構内踏切のZ
 	G.crossZ = G.platZ1 + 3;
 }
 
@@ -1631,10 +1734,6 @@ function maxStairs() {
 	if (!hasLink()) return 0;
 	return Math.max(1, Math.min(CFG.MAX_STAIRS, Math.round(S.cars * CFG.CAR_LEN / 50)));
 }
-function platX(i) { return (i - (S.nPlat - 1) / 2) * (S.platW + 2 * CFG.TRACK_W + 1.4); }
-function trackPlat(t) { return t >> 1; }
-function trackSide(t) { return (t & 1) ? 1 : -1; }
-function trackX(t) { return platX(trackPlat(t)) + trackSide(t) * (S.platW / 2 + CFG.TRACK_W / 2); }
 function stairZ(k) {
 	if (S.stairs === 1) return (G.stairA + G.stairB) / 2;
 	return G.stairA + k * (G.stairB - G.stairA) / (S.stairs - 1);
@@ -1654,8 +1753,9 @@ function gatePos(j) {
 }
 // ドア位置のZ (1両あたり2ドア)
 function doorZ(i) {
-	if (G.nDoors < 2) return 0;
-	return G.platZ0 + 3 + i * (G.platLen - 6) / (G.nDoors - 1);
+	if (G.nDoors < 2) return (G.platZ0 + G.platZ1) / 2;
+	const a = G.platZ0 + 3, b = G.platZ1 - 3;
+	return b <= a ? (a + b) / 2 : a + i * (b - a) / (G.nDoors - 1);
 }
 
 /* ================= 手続きテクスチャ =================
@@ -3787,6 +3887,10 @@ function load() {
 		if (!Array.isArray(S.trackDir)) S.trackDir = [];
 		for (let t = 0; t < S.nTrack; t++) if (S.trackDir[t] === undefined) S.trackDir[t] = t % 2;
 		// 駅舎の大きさを持っていなかった頃のセーブ。bldFit() が焼く直前に埋めるので0で足りる
+		// 線路とホームを持っていなかった頃のセーブ。いまの見た目のまま起こし直す
+		if (!Array.isArray(S.rail)) S.rail = [];
+		if (!Array.isArray(S.plat)) S.plat = [];
+		if (!S.rail.length && !S.plat.length) migrateLayout();
 		if (!Array.isArray(S.fac)) S.fac = [];
 		S.nextFid = Math.max(1, S.nextFid | 0);
 		for (const f of S.fac) if (f.i >= S.nextFid) S.nextFid = f.i + 1;
@@ -3822,8 +3926,8 @@ const UPGRADES = [
 			+ (nextCars() === 15 ? '基本10両+付属5両が着けられるようになる。' : '')
 			+ 'より長い編成を契約できるようになる。',
 		cost: () => 2200000 * Math.pow(1.42, (S.cars - CFG.CARS_MIN) / 2) * S.nPlat,
-		can: () => S.cars < CFG.CARS_MAX,
-		ng: () => CFG.CARS_MAX + '両が上限',
+		can: () => false,
+		ng: () => '🗺配置で置く',
 		apply: () => { S.cars = nextCars(); },
 	},
 	{
@@ -3897,8 +4001,8 @@ const UPGRADES = [
 		id: 'track', ic: '🛤', name: '線路を増設',
 		desc: '発着できる列車が増え、輸送力が上がる。ホーム1面につき2線まで。',
 		cost: () => 3200000 * Math.pow(1.30, S.nTrack - 1),
-		can: () => S.nTrack < S.nPlat * 2,
-		ng: () => '先にホームを増設',
+		can: () => false,
+		ng: () => '🗺配置で置く',
 		// 増設した番線は反対方向を初期値にする。島式ホームの上下1本ずつと同じ
 		apply: () => { S.trackDir[S.nTrack] = S.nTrack % 2; S.nTrack++; },
 	},
@@ -3906,16 +4010,16 @@ const UPGRADES = [
 		id: 'plat', ic: '🏗', name: 'ホームを増設',
 		desc: '島式ホームを1面追加。線路をさらに2本敷けるようになる。',
 		cost: () => 14000000 * Math.pow(1.55, S.nPlat - 1),
-		can: () => hasLink() && S.nPlat < 10,
-		ng: () => !hasLink() ? '橋上駅舎か地下道が必要' : '上限',
+		can: () => false,
+		ng: () => '🗺配置で置く',
 		apply: () => { S.nPlat++; },
 	},
 	{
 		id: 'platw', ic: '↔️', name: 'ホームを拡幅',
 		desc: 'ホームを2m広げる。待機客の密度が下がり、歩行が速くなる。',
 		cost: () => 2600000 * Math.pow(1.4, (S.platW - 6) / 2),
-		can: () => S.platW < 22,
-		ng: () => '上限',
+		can: () => false,
+		ng: () => '🗺配置で置く',
 		apply: () => { S.platW += 2; },
 	},
 	{
