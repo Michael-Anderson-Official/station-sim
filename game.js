@@ -1541,6 +1541,15 @@ function defaultState() {
 		trackDir: [],         // 番線 → 進行方向 0=北行き(+Zへ発車) / 1=南行き
 		tseed: [],            // 番線の永続ID。線路を敷き替えても番号が動かないための種セル
 		nextTid: 1,
+		// 行先。番線の進行方向ごとに並べる。km が運賃の取り分に効く
+		dests: [
+			{ id: 1, dir: 0, name: '中央町', km: 8 },
+			{ id: 2, dir: 0, name: '北野', km: 22 },
+			{ id: 3, dir: 0, name: '山下', km: 48 },
+			{ id: 4, dir: 1, name: '港南', km: 6 },
+			{ id: 5, dir: 1, name: '南浜', km: 19 },
+			{ id: 6, dir: 1, name: '岬崎', km: 45 },
+		],
 		runs: [],             // 1本ずつ置いたスジ [{id,m,cars,ty,track,at(分),dwell}]
 		runId: 1,
 		platW: 6,             // ホーム幅
@@ -2838,8 +2847,8 @@ function compileSched() {
 				dia: d.id, m: d.m, cars: d.cars, ty: d.ty, track: d.track,
 				arr: arr, dep: dep, spawn: arr - CFG.SPAWN_LEAD,
 				cap: slotCap(d.m, d.cars), flow: slotFlow(d.m, d.cars),
-				fare: typeFits(d.m, d.ty) ? TYPES[d.ty].fareMul : 1.0,
-				fits: typeFits(d.m, d.ty),
+				fare: (typeFits(d.m, d.ty) ? TYPES[d.ty].fareMul : 1.0) * destFare(d.dest),
+				fits: typeFits(d.m, d.ty), dest: d.dest,
 				ok: true,
 			});
 		}
@@ -2859,8 +2868,8 @@ function compileSched() {
 			run: r.id, m: r.m, cars: r.cars, ty: r.ty, track: r.track,
 			arr: arr, dep: arr + Math.max(15, r.dwell), spawn: arr - CFG.SPAWN_LEAD,
 			cap: slotCap(r.m, r.cars), flow: slotFlow(r.m, r.cars),
-			fare: typeFits(r.m, r.ty) ? TYPES[r.ty].fareMul : 1.0,
-			fits: typeFits(r.m, r.ty), ok: true,
+			fare: (typeFits(r.m, r.ty) ? TYPES[r.ty].fareMul : 1.0) * destFare(r.dest),
+			fits: typeFits(r.m, r.ty), dest: r.dest, ok: true,
 		});
 	}
 
@@ -2968,7 +2977,7 @@ function compileSched() {
 		if (tr.gone || tr.track >= R.trackBusy.length) continue;
 		R.trackBusy[tr.track] = Math.max(R.trackBusy[tr.track], tr.tDep + CFG.OCC_IN);
 	}
-	if (DIA.open) drawDia();
+	if (DIA.open) renderTimetable();
 }
 
 // この先しばらくの間に、その番線から「その志向の客が乗れる」スジがあるか
@@ -3897,6 +3906,7 @@ function load() {
 		if (typeof S.bldN !== 'number') S.bldN = 0;
 		if (typeof S.bldD !== 'number') S.bldD = 0;
 		if (typeof S.bldW !== 'number') S.bldW = 0;
+		if (!Array.isArray(S.dests) || !S.dests.length) S.dests = defaultState().dests;
 		if (!Array.isArray(S.runs)) S.runs = [];
 		S.runId = Math.max(1, S.runId | 0);
 		for (const r of S.runs) if (r.id >= S.runId) S.runId = r.id + 1;
@@ -4907,6 +4917,181 @@ function runCombos() {
 	return out;
 }
 
+
+/* ================= 時刻表 =================
+   駅の壁に貼ってある形そのまま。縦が時、横が分、セルに分と行先、色が種別。
+   ダイヤの作成も編集もここから行う */
+
+/* 行先。番線の進行方向ごとに、駅からの距離(km)つきで並べる。
+   距離が運賃の取り分に効くので、行先を選ぶことが数字として意味を持つ */
+function destList(dir) {
+	return (S.dests || []).filter(d => d.dir === dir);
+}
+function destOf(id) {
+	for (const d of (S.dests || [])) if (d.id === id) return d;
+	return null;
+}
+function destName(id) { const d = destOf(id); return d ? d.name : '—'; }
+// 行先の距離による運賃の倍率。近距離1.0、遠いほど大きい
+function destFare(id) {
+	const d = destOf(id);
+	if (!d) return 1;
+	return 1 + Math.min(1.4, d.km / 40);
+}
+// その番線で選べる既定の行先
+function defaultDest(track) {
+	const l = destList(dirOf(track));
+	return l.length ? l[0].id : 0;
+}
+
+const TT = { hour0: 5, hour1: 24 };
+
+/* 1本のスジを時刻表のセルにする */
+function ttCell(slot) {
+	const T = TYPES[slot.ty];
+    const el = document.createElement('button');
+	el.className = 'ttCell' + (slot.ok ? '' : ' bad') + (DIA.sel === slotKey(slot) ? ' sel' : '');
+	el.style.background = slot.ok ? '#' + T.col.toString(16).padStart(6, '0') : '#7a2f2a';
+	el.innerHTML = '<b>' + String(Math.floor(slot.arr / 60) % 60).padStart(2, '0') + '</b>'
+		+ '<span>' + destName(slot.dest) + '</span>';
+	el.onclick = () => {
+		DIA.sel = DIA.sel === slotKey(slot) ? null : slotKey(slot);
+		renderTimetable();
+	};
+	return el;
+}
+
+function renderTimetable() {
+	const el = document.getElementById('ttBody');
+	if (!el) return;
+	renderTrackTabs();
+	renderTrackDir();
+	el.innerHTML = '';
+
+	const tf = DIA.track < 0 ? 0 : DIA.track;
+	if (DIA.track < 0) DIA.track = 0;
+	const slots = (R.allSlots || []).filter(s => s.track === tf).slice().sort((a, b) => a.arr - b.arr);
+
+	// 時ごとに束ねる。4:00起点の分を「時計の時」に直す
+	const rows = new Map();
+	for (const s of slots) {
+		const h = Math.floor(((s.arr / 60) + 4 * 60) / 60) % 24;
+		if (!rows.has(h)) rows.set(h, []);
+		rows.get(h).push(s);
+	}
+
+	for (let i = 0; i < 20; i++) {
+		const h = (TT.hour0 + i) % 24;
+		const list = rows.get(h) || [];
+		const row = document.createElement('div');
+		row.className = 'ttRow';
+		const hh = document.createElement('div');
+		hh.className = 'ttHour';
+		hh.textContent = h;
+		row.appendChild(hh);
+		const cells = document.createElement('div');
+		cells.className = 'ttCells';
+		for (const s of list) cells.appendChild(ttCell(s));
+		// その時間に1本足す
+		const add = document.createElement('button');
+		add.className = 'ttAdd';
+		add.textContent = '＋';
+		add.onclick = () => ttAddAt(h);
+		cells.appendChild(add);
+		row.appendChild(cells);
+		el.appendChild(row);
+	}
+	renderTtSel();
+	renderDiaStat();
+}
+
+/* その時間に臨時を1本置く。分は空いているところを選ぶ */
+function ttAddAt(h) {
+	const combos = runCombos();
+	if (!combos.length) return;
+	const tr = Math.max(0, Math.min(S.nTrack - 1, DIA.track));
+	const base = ((h - 4 + 24) % 24) * 60;        // 4:00起点の分
+	const used = (R.allSlots || []).filter(x => x.track === tr).map(x => Math.round(x.arr / 60));
+	let at = base;
+	for (let k = 0; k < 60 && used.indexOf(at) >= 0; k++) at = base + k;
+	const prev = S.runs[S.runs.length - 1];
+	const r = {
+		id: S.runId++, track: tr, at: ((at % 1440) + 1440) % 1440, dwell: 45,
+		m: prev ? prev.m : combos[0].m, cars: prev ? prev.cars : combos[0].cars,
+		ty: prev ? prev.ty : 0, dest: defaultDest(tr),
+	};
+	if (r.cars > S.cars) { r.m = combos[0].m; r.cars = combos[0].cars; }
+	S.runs.push(r);
+	DIA.sel = 'r' + r.id;
+	compileSched(); renderTimetable(); save();
+}
+
+/* 選んだ1本の詳細。種別・行先・編成・時刻・停車をここで直す */
+function renderTtSel() {
+	const el = document.getElementById('ttSel');
+	if (!el) return;
+	el.innerHTML = '';
+	const key = DIA.sel;
+	if (!key) { el.hidden = true; return; }
+	el.hidden = false;
+	const isRun = key[0] === 'r';
+	const id = +key.slice(1);
+	const rec = isRun ? S.runs.find(x => x.id === id) : S.dia.find(x => x.id === id);
+	if (!rec) { el.hidden = true; DIA.sel = null; return; }
+
+	const head = document.createElement('div');
+	head.className = 'ttSelHead';
+	head.innerHTML = '<b>' + (isRun ? '⚡ 臨時' : '🔁 パターン') + '</b>'
+		+ '<span>' + modelOf(rec.m).name + ' ' + rec.cars + '両</span>';
+	const del = document.createElement('button');
+	del.className = 'del'; del.textContent = '✕';
+	del.onclick = () => {
+		if (isRun) S.runs = S.runs.filter(x => x.id !== id);
+		else S.dia = S.dia.filter(x => x.id !== id);
+		DIA.sel = null;
+		compileSched(); renderTimetable(); save();
+	};
+	head.appendChild(del);
+	el.appendChild(head);
+
+	// 種別
+	el.appendChild(typeRow(rec));
+	// 行先
+	const dl = destList(dirOf(rec.track));
+	if (dl.length) {
+		const at = Math.max(0, dl.findIndex(d => d.id === rec.dest));
+		el.appendChild(stepper('行先', () => at,
+			v => { const n = dl.length; rec.dest = dl[((v % n) + n) % n].id; },
+			v => { const n = dl.length; const d = dl[((v % n) + n) % n];
+				return d.name + ' ' + d.km + 'km (運賃×' + destFare(d.id).toFixed(2) + ')'; }));
+	}
+	// 編成
+	const combos = isRun ? runCombos() : S.fleet.map(f => ({ m: f.m, cars: f.cars }));
+	if (combos.length) {
+		const at = Math.max(0, combos.findIndex(c => c.m === rec.m && c.cars === rec.cars));
+		const pick = v => combos[((v % combos.length) + combos.length) % combos.length];
+		el.appendChild(stepper('編成', () => at,
+			v => { const c = pick(v); rec.m = c.m; rec.cars = c.cars; },
+			v => modelOf(pick(v).m).name + ' ' + pick(v).cars + '両'));
+	}
+	el.appendChild(stepper('番線', () => rec.track,
+		v => { rec.track = Math.max(0, Math.min(S.nTrack - 1, v)); DIA.track = rec.track; }, v => (v + 1) + '番線'));
+	if (isRun) {
+		el.appendChild(stepper('時刻', () => rec.at, v => { rec.at = ((v % 1440) + 1440) % 1440; }, clockOf));
+	} else {
+		el.appendChild(stepper('間隔', () => rec.every,
+			v => { rec.every = Math.max(2, Math.min(240, v)); rec.off = ((rec.off || 0) % rec.every + rec.every) % rec.every; }, v => v + '分毎'));
+		el.appendChild(stepper('ずらし', () => rec.off || 0,
+			v => { const e = Math.max(1, rec.every); rec.off = ((v % e) + e) % e; }, v => v + '分'));
+		el.appendChild(stepper('開始', () => rec.from,
+			v => { rec.from = Math.max(0, Math.min(rec.to - 30, Math.round(v / 30) * 30)); }, clockOf, 30));
+		el.appendChild(stepper('終了', () => rec.to,
+			v => { rec.to = Math.max(rec.from + 30, Math.min(1440, Math.round(v / 30) * 30)); }, clockOf, 30));
+	}
+	el.appendChild(stepper('停車', () => rec.dwell,
+		v => { rec.dwell = Math.max(15, Math.min(300, Math.round(v / 5) * 5)); }, v => v + '秒', 5));
+}
+
 function renderTrackTabs() {
 	const el = document.getElementById('diaTracks');
 	if (!el) return;
@@ -4915,7 +5100,7 @@ function renderTrackTabs() {
 		const b = document.createElement('button');
 		b.textContent = label;
 		if (DIA.track === t) b.className = 'on';
-		b.onclick = () => { DIA.track = t; renderDiaList(); drawDia(); };
+		b.onclick = () => { DIA.track = t; renderTimetable(); };
 		el.appendChild(b);
 	};
 	mk(-1, '全て');
@@ -4943,7 +5128,7 @@ function renderTrackDir() {
 		b.onclick = () => {
 			if (!S.trackDir) S.trackDir = [];
 			S.trackDir[t] = d;
-			compileSched(); renderDiaList(); drawDia(); save();
+			compileSched(); renderTimetable(); save();
 		};
 		dirRow.appendChild(b);
 	}
@@ -4996,7 +5181,7 @@ function renderDiaList() {
 		b.className = 'del'; b.textContent = '✕';
 		b.onclick = ev => { ev.stopPropagation(); del(); };
 		el2.appendChild(b);
-		el2.onclick = () => { DIA.sel = DIA.sel === key ? null : key; renderDiaList(); drawDia(); };
+		el2.onclick = () => { DIA.sel = DIA.sel === key ? null : key; renderTimetable(); };
 		el.appendChild(el2);
 		return el2;
 	};
@@ -5006,7 +5191,7 @@ function renderDiaList() {
 		row(key, r.ty, '⚡ ' + modelOf(r.m).name + ' ' + r.cars + '両', runSub(r), badR[r.id], () => {
 			S.runs = S.runs.filter(x => x.id !== r.id);
 			if (DIA.sel === key) DIA.sel = null;
-			compileSched(); renderDiaList(); drawDia(); save();
+			compileSched(); renderTimetable(); save();
 		});
 		if (DIA.sel === key) el.appendChild(buildRunInspector(r));
 	}
@@ -5016,7 +5201,7 @@ function renderDiaList() {
 		row(key, d.ty, patLabel(d), patSub(d), badD[d.id], () => {
 			S.dia = S.dia.filter(x => x.id !== d.id);
 			if (DIA.sel === key) DIA.sel = null;
-			compileSched(); renderDiaList(); drawDia(); save();
+			compileSched(); renderTimetable(); save();
 		});
 		if (DIA.sel === key) el.appendChild(buildInspector(d));
 	}
@@ -5046,7 +5231,7 @@ function buildLineMap() {
 			+ (lineOf(t) + 1) + ' / ' + (dirOf(t) ? '↓ ' : '↑ ') + DIR_NAME[dirOf(t)] + '</span>';
 		const b = document.createElement('button');
 		b.className = 'wide'; b.textContent = '編集';
-		b.onclick = () => { DIA.track = t; renderDiaList(); drawDia(); };
+		b.onclick = () => { DIA.track = t; renderTimetable(); };
 		p.appendChild(b);
 		box.appendChild(p);
 	}
@@ -5074,7 +5259,7 @@ function stepper(label, get, set, fmt, step) {
 	const mk = (t, dv) => {
 		const b = document.createElement('button');
 		b.textContent = t;
-		b.onclick = () => { set(get() + dv); compileSched(); renderDiaList(); drawDia(); save(); };
+		b.onclick = () => { set(get() + dv); compileSched(); renderTimetable(); save(); };
 		return b;
 	};
 	row.appendChild(mk('−', -st));
@@ -5103,7 +5288,7 @@ function typeRow(o) {
 		b.style.background = o.ty === T.id ? '#' + T.col.toString(16).padStart(6, '0') : 'rgba(255,255,255,.1)';
 		b.style.color = o.ty === T.id ? '#10161d' : '#e8eef7';
 		if (S.rank < T.rank) { b.disabled = true; b.style.opacity = '.4'; b.textContent = T.name + '(未解禁)'; }
-		b.onclick = () => { o.ty = T.id; compileSched(); renderDiaList(); drawDia(); save(); };
+		b.onclick = () => { o.ty = T.id; compileSched(); renderTimetable(); save(); };
 		tyRow.appendChild(b);
 	}
 	return tyRow;
@@ -5261,14 +5446,9 @@ function openDia() {
 	DIA.savedSpeed = R.speed;
 	R.speed = 0;                       // 編集中は時間を止める
 	document.querySelectorAll('#speed button').forEach(x => x.classList.toggle('active', +x.dataset.speed === 0));
-	if (!DIA.cv) initDiaCanvas();
-	// いまの時刻が画面の外なら、そこへ飛ばす(開くたびに5:00へ戻ると探し直しになる)
-	const nowMn = S.t / 60;
-	if (nowMn < DIA.t0 || nowMn > DIA.t0 + DIA.span) {
-		DIA.t0 = Math.max(0, Math.min(1440 - DIA.span, nowMn - DIA.span * 0.3));
-	}
-	diaResize();
-	renderDiaList(); renderFleet(); drawDia();
+	// 時刻表はDOMで組むのでキャンバスは使わない
+	if (DIA.track < 0) DIA.track = 0;
+	renderTimetable(); renderFleet();
 }
 function closeDia() {
 	DIA.open = false;
@@ -5290,11 +5470,11 @@ function initDiaUI() {
 			document.querySelectorAll('#diaSheet .seg button').forEach(x => x.classList.toggle('on', x === b));
 			document.getElementById('diaPane').hidden = DIA.tab !== 'dia';
 			document.getElementById('fleetPane').hidden = DIA.tab !== 'fleet';
-			if (DIA.tab === 'dia') { diaResize(); drawDia(); } else renderFleet();
+			if (DIA.tab === 'dia') renderTimetable(); else renderFleet();
 		};
 	});
 
-	document.querySelectorAll('#diaZoom button').forEach(b => {
+	document.querySelectorAll('#diaZoom button').forEach(b => {   // 旧UI。いまは要素が無い
 		b.onclick = () => {
 			const c = DIA.t0 + DIA.span / 2;
 			DIA.span = +b.dataset.span;
@@ -5304,7 +5484,8 @@ function initDiaUI() {
 		};
 	});
 
-	document.getElementById('diaAddOne').onclick = () => {
+	const addOne = document.getElementById('diaAddOne');
+	if (addOne) addOne.onclick = () => {
 		const combos = runCombos();
 		if (!combos.length) return;
 		const tr = Math.max(0, Math.min(S.nTrack - 1, DIA.track));
@@ -5318,16 +5499,18 @@ function initDiaUI() {
 		const r = {
 			id: S.runId++, m: base.m, cars: base.cars, ty: base.ty,
 			track: tr, at: ((at % 1440) + 1440) % 1440, dwell: 45,
+			dest: defaultDest(tr),
 		};
 		if (r.cars > S.cars) { r.m = combos[0].m; r.cars = combos[0].cars; }
 		S.runs.push(r);
 		DIA.sel = 'r' + r.id;
 		DIA.track = tr;
-		compileSched(); renderDiaList(); drawDia(); save();
+		compileSched(); renderTimetable(); save();
 		alertOnce('addrun', '臨時列車を1本追加（借り賃 ' + yen(runFee(r.m, r.cars)) + '/本）', true, 4);
 	};
 
-	document.getElementById('diaAdd').onclick = () => {
+	const addPat = document.getElementById('diaAdd');
+	if (addPat) addPat.onclick = () => {
 		if (!S.fleet.length) {
 			alertOnce('nofleet', '先に「契約」タブで編成を契約してください', false, 5);
 			return;
@@ -5337,14 +5520,15 @@ function initDiaUI() {
 			id: S.diaId++, m: f.m, cars: f.cars, ty: 0,
 			track: Math.max(0, Math.min(S.nTrack - 1, DIA.track)),
 			from: 60, to: 20 * 60, every: 30, off: 0, dwell: 45,
+			dest: defaultDest(Math.max(0, Math.min(S.nTrack - 1, DIA.track))),
 		};
 		S.dia.push(d);
 		DIA.sel = 'd' + d.id;
 		DIA.track = d.track;
-		compileSched(); renderDiaList(); drawDia(); save();
+		compileSched(); renderTimetable(); save();
 	};
 
-	window.addEventListener('resize', () => { if (DIA.open) { diaResize(); drawDia(); } });
+	window.addEventListener('resize', () => { if (DIA.open) renderTimetable(); });
 }
 
 /* ================= UI ================= */

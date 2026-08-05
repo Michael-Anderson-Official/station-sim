@@ -112,20 +112,13 @@
 	<div id="diaPane">
 		<div id="diaTracks"></div>
 		<div id="diaDir"></div>
-		<div id="diaZoom">
-			<button data-span="30">30分</button>
-			<button data-span="60" class="on">1時間</button>
-			<button data-span="180">3時間</button>
-			<button data-span="1440">全日</button>
-			<span id="diaClock"></span>
-		</div>
-		<canvas id="diaCv"></canvas>
-		<p class="hint" id="diaHint">帯を横にドラッグすると動きます（臨時はその1本だけ、パターンは全体）。何も無い所をドラッグすると時刻が動きます。</p>
+		<div id="ttBody"></div>
+		<div id="ttSel" hidden></div>
 		<div id="diaAddRow">
 			<button id="diaAddOne">⚡ ＋1本（臨時）</button>
 			<button id="diaAdd">＋ パターン</button>
 		</div>
-		<div id="diaList"></div>
+		<p class="hint">時刻をタップすると、その1本の種別・行先・編成・停車を直せます。各時間の ＋ でその時間に1本足せます。</p>
 		<div id="diaIssues"></div>
 	</div>
 

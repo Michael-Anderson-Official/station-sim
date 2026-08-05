@@ -214,6 +214,38 @@ html, body {
 
 #diaCv { width: 100%; display: block; border-radius: 8px; background: #0f1622; touch-action: none; }
 
+/* ===== 時刻表 ===== 駅の壁のものと同じ形。縦が時、横が分 */
+#ttBody { background: #0f1622; border-radius: 8px; overflow: hidden; }
+.ttRow { display: flex; align-items: stretch; border-bottom: 1px solid rgba(255,255,255,.06); }
+.ttRow:last-child { border-bottom: none; }
+.ttHour {
+	flex: none; width: 30px; display: flex; align-items: center; justify-content: center;
+	font-size: 15px; font-weight: 800; color: #cfe0f5; background: rgba(255,255,255,.06);
+}
+.ttCells { flex: 1; display: flex; flex-wrap: wrap; gap: 3px; padding: 3px; min-height: 34px; }
+.ttCell {
+	flex: none; width: 38px; border: none; border-radius: 4px; padding: 2px 0 1px;
+	font-family: inherit; color: #10161d; display: flex; flex-direction: column; align-items: center;
+}
+.ttCell b { font-size: 13px; font-weight: 800; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.ttCell span { font-size: 8px; line-height: 1.2; opacity: .85; white-space: nowrap; }
+.ttCell.sel { outline: 2px solid #fff; }
+.ttCell.bad { color: #ffd8d0; }
+.ttAdd {
+	flex: none; width: 38px; min-height: 28px; border: none; border-radius: 4px;
+	background: rgba(255,255,255,.07); color: #7f8ea3; font-size: 14px; font-family: inherit;
+}
+#ttSel {
+	margin-top: 8px; background: rgba(0,0,0,.24); border-radius: 9px; padding: 9px;
+}
+.ttSelHead { display: flex; align-items: baseline; gap: 7px; margin-bottom: 4px; }
+.ttSelHead b { font-size: 13px; font-weight: 800; }
+.ttSelHead span { font-size: 10px; opacity: .65; }
+.ttSelHead .del {
+	margin-left: auto; border: none; background: rgba(200,60,50,.2); color: #ff9a8a;
+	width: 28px; height: 28px; border-radius: 6px; font-size: 13px;
+}
+
 #diaList { margin-top: 8px; }
 .diaRow {
 	display: flex; align-items: center; gap: 7px; width: 100%;
