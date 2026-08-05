@@ -116,6 +116,7 @@ const GRID = { CELL: 2, W: 176, D: 224, L: 2, OX: 88, OZ: 112 };
 const C_EMPTY = 0, C_RAIL_L = 1, C_RAIL_R = 2, C_PLAT = 3, C_FLOOR = 4,
 	C_WALL = 5, C_STAIR = 6, C_ESCAL = 7, C_GATE = 8, C_UNUSED9 = 9,
 	C_SHOP = 10, C_VEND = 11, C_BENCH = 12, C_PILLAR = 13, C_ENTRANCE = 14,
+	C_ROAD = 15, C_BLDG = 16,
 	C_OOB = 255;
 
 // 属性ビット。踏切は「線路の上に重なる」ので種別ではなくビットで持つ。
@@ -337,7 +338,8 @@ function gridFromParams() {
 	layStructure();            // 駅舎と出入口
 	if (!S.fac.length) facSync();
 	facPlaceAll();
-	buildWalkGraph();
+	buildWalkGraph();          // 出入口の位置がここで確定する
+	layTown();                 // 道路と建物(歩行の対象ではないので最後)
 	facRebindRuntime();
 }
 
@@ -1511,11 +1513,7 @@ for (const d of DEVS) DEV[d.id] = d;
 function devCount(id) { return (S.devs && S.devs[id]) | 0; }
 function devCost(d) { return Math.round(d.cost * Math.pow(d.growth, devCount(d.id))); }
 // 1日の潜在乗降(人)。開発が無ければゼロ
-function potentialPax() {
-	let n = 0;
-	for (const d of DEVS) n += d.pax * devCount(d.id);
-	return n;
-}
+function potentialPax() { return townPax(); }
 
 // 時間帯別の需要倍率 (0時〜23時)
 const HOURLY = [
@@ -1567,6 +1565,8 @@ function defaultState() {
 		// 線路とホームはユーザーが置く。これが盤面の正
 		rail: [{ x: GRID.OX - 1 }],   // 左レールの列 [{x}]。開業時は1本だけ通っている
 		plat: [],             // ホームのマス [{x,z}]
+		road: [],             // 道路のマス [{x,z}]
+		bldg: [],             // 町の建物 [{k:DEVSのid, x, z}]
 		shops: 0,             // 駅ナカ店舗
 		// 駅周辺の開発。これが乗客の源。開業時は小さな住宅地が1つあるだけ
 		devs: { home1: 1 },
@@ -2588,99 +2588,42 @@ function buildGround() {
 	scene.add(groundMesh);
 }
 
+/* 町の3D。自動生成はやめ、置かれた道路と建物だけを描く */
 function buildCity() {
 	disposeGroup(cityGroup);
 	buildGround();
-	_seed = 20260802;
 
-	const railHalf = Math.abs(trackX(S.nTrack - 1)) + CFG.TRACK_W * 2 + 14;
-	const trackLen = G.platLen + 520;
-	const grow = Math.min(1, S.rank / 8 + Math.log10(Math.max(1, S.town)) / 3.2);
-	const hMax = 12 + grow * 92;
-	const reach = 420 + grow * 620;
-	// 建物の数が一定になるよう、範囲に応じて間隔を広げる
-	const step = Math.max(30, reach * 2 / 22);
+	// 道路
+	const roadGeo = new THREE.PlaneGeometry(GRID.CELL, GRID.CELL);
+	roadGeo.rotateX(-Math.PI / 2);
+	const roads = [];
+	for (const c of S.road) roads.push([wx(c.x), 0.06, wz(c.z)]);
+	addInstanced(roadGeo, MAT.road, roads, cityGroup, false);
 
+	// 建物。種類ごとに高さと色を変える
 	const bGeo = new THREE.BoxGeometry(1, 1, 1);
 	bGeo.translate(0, 0.5, 0);
 	const byClass = CFG.BLD_CLASS.map(() => []);
 	const byClassCol = CFG.BLD_CLASS.map(() => []);
-	const lots = [], lotCol = [];
-	const trees = [];
-	const plazaX = G.plazaX === undefined ? 0 : G.plazaX;
-	// 駅のまわりは開けておく(カメラが建物に埋まらないように)
-	const clear = Math.max(150, railHalf + 60);
-	// 発展度が低いうちは建物もまばら
-	const density = 0.30 + grow * 0.58;
-
-	for (let x = -reach; x <= reach; x += step) {
-		for (let z = -reach; z <= reach; z += step) {
-			// 線路の帯・駅舎・駅前広場は空ける
-			if (Math.abs(x) < railHalf && z > -trackLen / 2 && z < trackLen / 2) continue;
-			// 駅舎と駅前広場のぶんを空ける
-			if (x > G.concX0 - 12 && x < (hasLink() ? plazaX + 78 : G.concX1 + 12)
-				&& z > G.concZ0 - 12 && z < G.exitZ + 52) continue;
-			const d = Math.hypot(x, z);
-			if (d > reach || d < clear) continue;
-			// 区画の地色を敷いて、地面が単調にならないようにする
-			lots.push([x, -0.42, z, 0, 0, 0, step * 0.86, 1, step * 0.86]);
-			lotCol.push(LOT_COLORS[(srand() * LOT_COLORS.length) | 0]);
-			const r = srand();
-			if (r > density) {
-				if (r > 0.88) trees.push([x + srand() * 12 - 6, 0, z + srand() * 12 - 6]);
-				continue;
-			}
-			// 駅に近いほど高い
-			const near = Math.max(0, 1 - d / reach);
-			const h = 5 + srand() * hMax * (0.28 + near * 1.05);
-			const w = 12 + srand() * 14, dp = 12 + srand() * 14;
-			let ci = 0;
-			while (ci < CFG.BLD_CLASS.length - 1 && h > CFG.BLD_CLASS[ci].max) ci++;
-			byClass[ci].push([x + srand() * 10 - 5, 0, z + srand() * 10 - 5, 0, srand() * 0.5 - 0.25, 0, w, h, dp]);
-			byClassCol[ci].push(BLD_COLORS[(srand() * BLD_COLORS.length) | 0]);
-		}
+	const H = { home1: 8, school: 12, office1: 22, shop1: 16, univ: 20, office2: 68, home2: 26, sub: 120 };
+	for (const b of S.bldg) {
+		const [w, d] = bldgSize(b.k);
+		const h = H[b.k] || 10;
+		const ci = h > 46 ? 2 : h > 18 ? 1 : 0;
+		const wm = w * GRID.CELL - 1.2, dm = d * GRID.CELL - 1.2;
+		byClass[ci].push([wx(b.x) - GRID.CELL / 2 + w * GRID.CELL / 2, 0,
+			wz(b.z) - GRID.CELL / 2 + d * GRID.CELL / 2, wm, h, dm]);
+		byClassCol[ci].push(b.off ? C(0x6a6a6a) : null);
 	}
-
-	const lotGeo = new THREE.BoxGeometry(1, 0.05, 1);
-	addInstanced(lotGeo, MAT.parcel, lots, cityGroup, false, lotCol);
-
-	byClass.forEach((list, ci) => {
+	for (let ci = 0; ci < byClass.length; ci++) {
+		const list = byClass[ci];
+		if (!list.length) continue;
 		addInstanced(bGeo, MAT.bldg[ci], list, cityGroup, true, byClassCol[ci]);
-		// 夜だけ光る窓(同じ形に加算合成で重ねる)
 		const lit = addInstanced(bGeo, MAT.winLit[ci], list.map(b => b.slice()), cityGroup, false);
-		if (lit) { lit.renderOrder = 3; lit.receiveShadow = false; }
-	});
-
-	// 道路網。建物と同じ格子に敷いて「街区」に見せる
-	const roadGeo = new THREE.BoxGeometry(1, 0.06, 1);
-	const roads = [];
-	for (let x = -reach; x <= reach; x += step * 2) {
-		if (Math.abs(x) < railHalf) continue;
-		roads.push([x, -0.4, 0, 0, 0, 0, 9, 1, reach * 2]);
+		if (lit) cityGroup.userData.lit = (cityGroup.userData.lit || []).concat([lit]);
 	}
-	for (let z = -reach; z <= reach; z += step * 2) {
-		roads.push([0, -0.4, z, 0, 0, 0, reach * 2, 1, 9]);
-	}
-	addInstanced(roadGeo, MAT.road, roads, cityGroup, false);
-
-	// 街路樹
-	const tGeo = new THREE.SphereGeometry(2.6, 6, 5);
-	tGeo.translate(0, 5.2, 0);
-	addInstanced(tGeo, MAT.tree, trees, cityGroup, true);
-	const trGeo = new THREE.CylinderGeometry(0.3, 0.4, 3.4, 5);
-	trGeo.translate(0, 1.7, 0);
-	addInstanced(trGeo, MAT.trunk, trees, cityGroup, false);
-
-	// 駅前広場。駅の規模に合わせる
-	const pw = 34 + grow * 60, pd = 30 + grow * 54;
-	const sq = new THREE.Mesh(new THREE.PlaneGeometry(pw, pd), MAT.road);
-	sq.rotation.x = -Math.PI / 2;
-	const px = hasLink() ? plazaX + 18 + pw / 2 : (G.plazaCx === undefined ? 0 : G.plazaCx);
-	const pz = G.plazaCz === undefined ? G.exitZ : G.plazaCz;
-	sq.position.set(px, -0.38, pz);
-	sq.receiveShadow = true;
-	cityGroup.add(sq);
 }
+
 
 // 駅全体が画角に収まる位置へカメラを置く(起動時のみ)
 function fitCamera() {
@@ -3906,6 +3849,9 @@ function load() {
 		// 線路とホームを持っていなかった頃のセーブ。いまの見た目のまま起こし直す
 		if (!Array.isArray(S.rail)) S.rail = [];
 		if (!Array.isArray(S.plat)) S.plat = [];
+		if (!Array.isArray(S.road)) S.road = [];
+		if (!Array.isArray(S.bldg)) S.bldg = [];
+		if (!S.bldg.length && S.devs && Object.keys(S.devs).length) migrateTown();
 		if (S.plat.length === 0 && S.rail.length <= 1 && (o.nPlat > 0 && o.cars > 0 && o.nTrack > 0 && o.plat === undefined)) { S.rail = []; migrateLayout(); }
 		if (!Array.isArray(S.fac)) S.fac = [];
 		S.nextFid = Math.max(1, S.nextFid | 0);
@@ -4138,8 +4084,9 @@ function renderDevs() {
 			const c = devCost(d);
 			if (S.rep < d.rep || !canSpend(c)) return;
 			S.money -= c;
-			if (!S.devs) S.devs = {};
-			S.devs[d.id] = devCount(d.id) + 1;
+			// 町は 🏗建てる で盤面に置くようになった。ここでは買えない
+			alertOnce('devmoved', '町は 🏗建てる で置きます(道路で駅まで繋いでください)', false, 6);
+			return;
 			S.town = potentialPax() / 10000;
 			navigator.vibrate && navigator.vibrate(12);
 			renderDevs(); buildStation(); save();
@@ -4179,6 +4126,162 @@ function resetRuntimeForLayout() {
 }
 
 
+
+
+/* ================= 町 =================
+   道路と建物もユーザーが置く。乗客は「駅までの距離」と
+   「道路で駅までつながっていること」で決まる。
+   置いただけでは1人も来ない — 駅前まで道を通して初めて人が動く */
+
+// 建物の大きさ。DEVS の id に対応する
+const BLDG_SIZE = {
+	home1: [2, 2], school: [4, 3], office1: [3, 3], shop1: [4, 4],
+	univ: [5, 4], office2: [3, 4], home2: [5, 5], sub: [6, 6],
+};
+function bldgSize(id) { return BLDG_SIZE[id] || [2, 2]; }
+function devOf(id) { for (const d of DEVS) if (d.id === id) return d; return null; }
+
+/* 道路の連結。駅の出入口に接している道から辿れる道だけが「つながっている」 */
+function roadReach() {
+	const key = (x, z) => x * GRID.D + z;
+	const road = new Set();
+	for (const c of S.road) road.add(key(c.x, c.z));
+	const seen = new Set();
+	const q = [];
+	// 出入口の帯に接している道路から始める
+	if (WK.entRect) {
+		const r = WK.entRect;
+		for (let x = r.x0 - 1; x <= r.x1 + 1; x++) {
+			for (let z = r.z0 - 1; z <= r.z1 + 2; z++) {
+				const k = key(x, z);
+				if (road.has(k) && !seen.has(k)) { seen.add(k); q.push([x, z]); }
+			}
+		}
+	}
+	let h = 0;
+	while (h < q.length) {
+		const [x, z] = q[h++];
+		for (const d of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+			const nx = x + d[0], nz = z + d[1], k = key(nx, nz);
+			if (road.has(k) && !seen.has(k)) { seen.add(k); q.push([nx, nz]); }
+		}
+	}
+	return seen;
+}
+
+/* 建物が道路につながっているか。建物の外周1マスに、駅まで通じた道があること */
+function bldgConnected(b, reach) {
+	const [w, d] = bldgSize(b.k);
+	const key = (x, z) => x * GRID.D + z;
+	for (let x = b.x - 1; x <= b.x + w; x++) {
+		for (let z = b.z - 1; z <= b.z + d; z++) {
+			if (x >= b.x && x < b.x + w && z >= b.z && z < b.z + d) continue;
+			if (reach.has(key(x, z))) return true;
+		}
+	}
+	return false;
+}
+
+/* 駅からの距離による効き方。近いほど多く使う。
+   出入口からのマンハッタン距離(m)で見る */
+function bldgDist(b) {
+	const [w, d] = bldgSize(b.k);
+	const cxm = wx(b.x + (w - 1) / 2), czm = wz(b.z + (d - 1) / 2);
+	const ex = WK.entRect ? wx((WK.entRect.x0 + WK.entRect.x1) / 2) : 0;
+	const ez = WK.entRect ? wz((WK.entRect.z0 + WK.entRect.z1) / 2) : 0;
+	return Math.abs(cxm - ex) + Math.abs(czm - ez);
+}
+// 400m まで満額、そこから落ちて 1200m でほぼ0
+function distFactor(m) {
+	if (m <= 400) return 1;
+	if (m >= 1200) return 0.05;
+	return 0.05 + 0.95 * (1200 - m) / 800;
+}
+
+/* 置いてある建物から1日の需要を出す。
+   道でつながっていない建物は1人も出さない */
+/* 旧セーブの S.devs(種類ごとの個数)を、駅前に並べた建物と道路に起こす。
+   移行してもその人の投資が消えないようにする */
+function migrateTown() {
+	const ez = GRID.OZ + 20;                 // 駅前より少し先から並べる
+	let x = GRID.OX - 24, z = ez + 3, rowH = 0;   // 道路(ez+2)の1マス隣に並べる
+	// 駅前から東西に伸びる幹線道路
+	for (let i = GRID.OX - 30; i <= GRID.OX + 30; i++) S.road.push({ x: i, z: ez + 2 });
+	for (let i = GRID.OZ + 2; i <= ez + 2; i++) S.road.push({ x: GRID.OX, z: i });
+	for (const d of DEVS) {
+		const n = (S.devs && S.devs[d.id]) | 0;
+		for (let k = 0; k < n; k++) {
+			const [w, h] = bldgSize(d.id);
+			if (x + w > GRID.OX + 28) { x = GRID.OX - 24; z += rowH + 2; rowH = 0;
+				for (let i = GRID.OX - 30; i <= GRID.OX + 30; i++) S.road.push({ x: i, z: z - 1 }); }
+			if (z + h >= GRID.D - 2) return;
+			S.bldg.push({ k: d.id, x: x, z: z });
+			x += w + 1; rowH = Math.max(rowH, h);
+		}
+	}
+}
+
+function townPax() {
+	const reach = roadReach();
+	let n = 0;
+	TOWN.live = 0; TOWN.off = 0;
+	for (const b of S.bldg) {
+		const d = devOf(b.k);
+		if (!d) continue;
+		if (!bldgConnected(b, reach)) { b.off = 1; TOWN.off++; continue; }
+		b.off = 0; TOWN.live++;
+		n += d.pax * distFactor(bldgDist(b));
+	}
+	return n;
+}
+const TOWN = { live: 0, off: 0 };
+
+/* 建てられるか。盤の中で、駅の設備や線路・ホームに被らないこと */
+function bldgWhy(id, x, z) {
+	const [w, d] = bldgSize(id);
+	for (let i = 0; i < w; i++) for (let j = 0; j < d; j++) {
+		const px = x + i, pz = z + j;
+		if (!inBoard(px, pz)) return '盤の外';
+		if (isRailCell(px, pz)) return '線路の上には置けない';
+		if (isPlatCell(px, pz)) return 'ホームの上には置けない';
+		if (tAt(0, px, pz) !== C_EMPTY && tAt(0, px, pz) !== C_ROAD) return '駅の敷地には置けない';
+		for (const r of S.road) if (r.x === px && r.z === pz) return '道路の上には置けない';
+		for (const o of S.bldg) {
+			const [ow, od] = bldgSize(o.k);
+			if (o !== null && px >= o.x && px < o.x + ow && pz >= o.z && pz < o.z + od) return '建物が重なる';
+		}
+	}
+	return null;
+}
+
+function roadWhy(x, z) {
+	if (!inBoard(x, z)) return '盤の外';
+	if (isRailCell(x, z)) return '線路の上には置けない';
+	if (isPlatCell(x, z)) return 'ホームの上には置けない';
+	if (tAt(0, x, z) !== C_EMPTY && tAt(0, x, z) !== C_ROAD) return '駅の敷地には置けない';
+	for (const b of S.bldg) {
+		const [w, d] = bldgSize(b.k);
+		if (x >= b.x && x < b.x + w && z >= b.z && z < b.z + d) return '建物の上には置けない';
+	}
+	return null;
+}
+
+/* 盤面へ焼く。道路と建物は歩行の対象ではないので WALKABLE には入れない */
+function layTown() {
+	for (const c of S.road) {
+		if (!inBoard(c.x, c.z)) continue;
+		const k = gidx(0, c.x, c.z);
+		if (B.t[k] === C_EMPTY) B.t[k] = C_ROAD;
+	}
+	for (const b of S.bldg) {
+		const [w, d] = bldgSize(b.k);
+		for (let i = 0; i < w; i++) for (let j = 0; j < d; j++) {
+			if (!inBoard(b.x + i, b.z + j)) continue;
+			const k = gidx(0, b.x + i, b.z + j);
+			if (B.t[k] === C_EMPTY || B.t[k] === C_ROAD) B.t[k] = C_BLDG;
+		}
+	}
+}
 
 /* ================= 3Dの上で建てる =================
    指の下のマスをレイキャストで拾う。1本指は建てる操作、視点は2本指。
@@ -4280,6 +4383,18 @@ function buildGhost() {
 
 /* ---- 操作 ---- */
 function buildUpdatePending() {
+	if (BUILD.tool === 'road') return;          // 道路はなぞった端から敷く
+	if (BUILD.tool === 'bldg' && BUILD.to) {
+		const id = BUILD.bldg || DEVS[0].id, sz = bldgSize(id), d = devOf(id);
+		const r = { kind: 'bldg', id: id, x0: BUILD.to.x, x1: BUILD.to.x + sz[0] - 1,
+			z0: BUILD.to.z, z1: BUILD.to.z + sz[1] - 1, cost: d ? d.cost : 0 };
+		r.why = bldgWhy(id, r.x0, r.z0);
+		if (!r.why && S.money < r.cost) r.why = '資金が足りない';
+		if (!r.why && d && S.rep < d.rep) r.why = '評判' + d.rep + 'から';
+		BUILD.pending = r;
+		buildGhost(); renderBuildBar();
+		return;
+	}
 	if (BUILD.tool === 'plat' && BUILD.from && BUILD.to) {
 		const r = platRectCells(BUILD.from, BUILD.to);
 		r.kind = 'plat';
@@ -4314,10 +4429,13 @@ function buildConfirm() {
 	if (p.kind === 'plat') {
 		for (const c of p.cells) S.plat.push({ x: c.x, z: c.z });
 		BUILD.undo.push({ plat: p.cells.slice(), cost: p.cost });
-	} else {
+	} else if (p.kind === 'rail') {
 		S.rail.push({ x: p.x0 });
 		S.rail.sort((a, b) => a.x - b.x);
 		BUILD.undo.push({ rail: p.x0, cost: p.cost });
+	} else if (p.kind === 'bldg') {
+		S.bldg.push({ k: p.id, x: p.x0, z: p.z0 });
+		BUILD.undo.push({ bldg: { x: p.x0, z: p.z0 }, cost: p.cost });
 	}
 	S.money -= p.cost;
 	BUILD.pending = null; BUILD.from = null; BUILD.to = null;
@@ -4341,6 +4459,14 @@ function buildUndo() {
 	} else if (u.rail !== undefined) {
 		const i = S.rail.findIndex(q => q.x === u.rail);
 		if (i >= 0) S.rail.splice(i, 1);
+	} else if (u.bldg) {
+		const i = S.bldg.findIndex(q => q.x === u.bldg.x && q.z === u.bldg.z);
+		if (i >= 0) S.bldg.splice(i, 1);
+	} else if (u.road) {
+		for (const c of u.road) {
+			const i = S.road.findIndex(q => q.x === c.x && q.z === c.z);
+			if (i >= 0) S.road.splice(i, 1);
+		}
 	}
 	S.money += u.cost;
 	facApply(); renderBuildBar(); save();
@@ -4355,6 +4481,22 @@ function buildEraseAt(c) {
 		facApply(); renderBuildBar(); save();
 		return;
 	}
+	i = S.road.findIndex(q => q.x === c.x && q.z === c.z);
+	if (i >= 0) {
+		S.road.splice(i, 1);
+		S.money += Math.round(ROAD_PRICE * BUILD_REFUND);
+		facApply(); renderBuildBar(); save();
+		return;
+	}
+	i = S.bldg.findIndex(q => { const sz = bldgSize(q.k);
+		return c.x >= q.x && c.x < q.x + sz[0] && c.z >= q.z && c.z < q.z + sz[1]; });
+	if (i >= 0) {
+		const d = devOf(S.bldg[i].k);
+		S.bldg.splice(i, 1);
+		S.money += Math.round((d ? d.cost : 0) * BUILD_REFUND);
+		facApply(); renderBuildBar(); save();
+		return;
+	}
 	i = S.rail.findIndex(q => q.x === c.x || q.x + 1 === c.x);
 	if (i >= 0) {
 		const x = S.rail[i].x;
@@ -4366,6 +4508,19 @@ function buildEraseAt(c) {
 	}
 }
 
+// なぞった1マスに道を敷く。連続して引けるようにストロークで貯める
+function buildRoadAt(c) {
+	if (!BUILD.stroke) BUILD.stroke = [];
+	for (const q of BUILD.stroke) if (q.x === c.x && q.z === c.z) return;
+	if (roadWhy(c.x, c.z)) return;
+	for (const q of S.road) if (q.x === c.x && q.z === c.z) return;
+	if (S.money < ROAD_PRICE) return;
+	S.money -= ROAD_PRICE;
+	S.road.push({ x: c.x, z: c.z });
+	BUILD.stroke.push({ x: c.x, z: c.z });
+	renderBuildBar();
+}
+
 function initBuild3D() {
 	const dom = renderer.domElement;
 	dom.addEventListener('pointerdown', e => {
@@ -4375,19 +4530,29 @@ function initBuild3D() {
 		const c = pickCell(e.clientX, e.clientY, 0);
 		if (!c) return;
 		if (BUILD.tool === 'erase') { buildEraseAt(c); return; }
+		if (BUILD.tool === 'road') { BUILD.stroke = []; buildRoadAt(c); return; }
 		BUILD.from = c; BUILD.to = c;
 		buildUpdatePending();
 	});
 	dom.addEventListener('pointermove', e => {
-		if (!BUILD.on || BUILD.pointers !== 1 || !BUILD.from) return;
+		if (!BUILD.on || BUILD.pointers !== 1) return;
+		if (BUILD.tool !== 'road' && !BUILD.from) return;
 		const c = pickCell(e.clientX, e.clientY, 0);
 		if (!c) return;
+		if (BUILD.tool === 'road') { buildRoadAt(c); return; }
 		BUILD.to = c;
 		buildUpdatePending();
 	});
 	const up = () => {
 		BUILD.pointers = Math.max(0, BUILD.pointers - 1);
-		if (BUILD.pointers === 0) controls.enabled = true;
+		if (BUILD.pointers === 0) {
+			controls.enabled = true;
+			if (BUILD.stroke && BUILD.stroke.length) {
+				BUILD.undo.push({ road: BUILD.stroke.slice(), cost: BUILD.stroke.length * ROAD_PRICE });
+				BUILD.stroke = null;
+				facApply(); renderBuildBar(); save();
+			}
+		}
 	};
 	dom.addEventListener('pointerup', up);
 	dom.addEventListener('pointercancel', up);
@@ -4396,8 +4561,11 @@ function initBuild3D() {
 const B3_TOOLS = [
 	{ id: 'plat', ic: '🚉', name: 'ホーム' },
 	{ id: 'rail', ic: '🛤', name: '線路' },
+	{ id: 'road', ic: '🛣', name: '道路' },
+	{ id: 'bldg', ic: '🏘', name: '建物' },
 	{ id: 'erase', ic: '🗑', name: '撤去' },
 ];
+const ROAD_PRICE = 40000;
 
 function renderBuildBar() {
 	const el = document.getElementById('b3Tools');
@@ -4410,6 +4578,24 @@ function renderBuildBar() {
 		b.onclick = () => { BUILD.tool = t.id; buildCancel(); renderBuildBar(); };
 		el.appendChild(b);
 	}
+	// 建物の道具のときは、種類を選ぶ帯を出す
+	const pick = document.getElementById('b3Pick');
+	if (pick) {
+		pick.hidden = BUILD.tool !== 'bldg';
+		if (BUILD.tool === 'bldg') {
+			pick.innerHTML = '';
+			for (const d of DEVS) {
+				const b = document.createElement('button');
+				const lock = S.rep < d.rep;
+				b.innerHTML = '<b>' + d.ic + '</b><span>' + d.name + '</span><i>'
+					+ (lock ? '評判' + d.rep : yen(d.cost)) + '</i>';
+				if ((BUILD.bldg || DEVS[0].id) === d.id) b.className = 'on';
+				if (lock) b.classList.add('poor');
+				b.onclick = () => { BUILD.bldg = d.id; buildCancel(); renderBuildBar(); };
+				pick.appendChild(b);
+			}
+		}
+	}
 	const info = document.getElementById('b3Info');
 	const ok = document.getElementById('b3Ok');
 	const ng = document.getElementById('b3Ng');
@@ -4417,13 +4603,20 @@ function renderBuildBar() {
 	if (info) {
 		if (!p) {
 			info.textContent = BUILD.tool === 'plat' ? 'ホームを引く'
-				: BUILD.tool === 'rail' ? '線路を敷く場所をタップ' : '消したいものをタップ';
+				: BUILD.tool === 'rail' ? '線路を敷く場所をタップ'
+				: BUILD.tool === 'road' ? 'なぞって道路を敷く(¥4万/マス) · 駅前から繋げないと人は来ない'
+				: BUILD.tool === 'bldg' ? '建てる場所をタップ' : '消したいものをタップ';
 		} else if (p.kind === 'plat') {
 			const w = p.x1 - p.x0 + 1, d = p.z1 - p.z0 + 1;
 			info.textContent = w + '×' + d + 'マス (' + (w * GRID.CELL) + 'm×' + (d * GRID.CELL) + 'm) '
 				+ platRectCars(p) + '両 · ' + yen(p.cost) + (p.why ? ' — ' + p.why : '');
-		} else {
+		} else if (p.kind === 'rail') {
 			info.textContent = '線路1本 · ' + yen(p.cost) + (p.why ? ' — ' + p.why : '');
+		} else {
+			const d = devOf(p.id);
+			info.textContent = (d ? d.name : '建物') + ' ' + (p.x1 - p.x0 + 1) + '×' + (p.z1 - p.z0 + 1) + 'マス · '
+				+ yen(p.cost) + (d ? ' · ' + d.pax.toLocaleString() + '人/日' : '')
+				+ (p.why ? ' — ' + p.why : '');
 		}
 	}
 	if (ok) { ok.hidden = !p; ok.disabled = !!(p && p.why); }
@@ -4433,7 +4626,9 @@ function renderBuildBar() {
 	const st = document.getElementById('b3Stat');
 	if (st) {
 		const np = DV.plats.length, nt = DV.tracks.length;
-		st.textContent = np ? (np + '面' + nt + '線 ' + G.cars + '両') : (nt + '線 · ホームがまだ無い');
+		potentialPax();      // TOWN を最新にしてから出す
+		const base = np ? (np + '面' + nt + '線 ' + G.cars + '両') : (nt + '線 · ホームがまだ無い');
+		st.textContent = base + ' · 町' + S.bldg.length + '棟' + (TOWN.off ? '(道が無い' + TOWN.off + ')' : '');
 	}
 	const un = document.getElementById('b3Undo');
 	if (un) un.disabled = !BUILD.undo.length;
@@ -6114,6 +6309,11 @@ function boot() {
 		walkStats: () => walkStats(),
 		walkSweep: () => walkSweep(),
 		boardHash: () => boardHash(),
+		// 町: 需要と、道でつながっているか
+		town: () => { const n = potentialPax();
+			return { pax: Math.round(n), 建物: S.bldg.length, つながり: TOWN.live, 切れ: TOWN.off,
+				道路: S.road.length,
+				内訳: S.bldg.map(b => b.k + '(' + Math.round(bldgDist(b)) + 'm ×' + distFactor(bldgDist(b)).toFixed(2) + ')' + (b.off ? ' 休' : '')) }; },
 		// 検証用: 全レーンの予約を捨てる(R.now を巻き戻す計測でだけ使う)
 		clearQueues: () => { R.facFree.fill(R.now); return FACR.lane.size; },
 		// 設備ごとの待ち時間(秒)。増築を挟んでも連続しているべき

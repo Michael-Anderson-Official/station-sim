@@ -117,6 +117,22 @@ html, body {
 #b3Ok { background: #4a9d6a; color: #fff; }
 #b3Ok:disabled { background: rgba(255,255,255,.1); color: #6b7686; }
 #b3Ng { background: rgba(255,255,255,.12); color: #e8eef7; padding: 10px 14px; }
+#b3Pick {
+	display: flex; gap: 5px; overflow-x: auto; padding: 6px 10px 0;
+	scrollbar-width: none;
+}
+#b3Pick::-webkit-scrollbar { display: none; }
+#b3Pick button {
+	flex: none; width: 64px; min-height: 50px; border: none; border-radius: 8px;
+	background: rgba(255,255,255,.08); color: #cfe0f5; font-family: inherit;
+	display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+}
+#b3Pick button b { font-size: 16px; font-weight: 400; line-height: 1; }
+#b3Pick button span { font-size: 9px; font-weight: 700; white-space: nowrap; }
+#b3Pick button i { font-style: normal; font-size: 8px; opacity: .6; }
+#b3Pick button.on { background: #4a9d6a; color: #fff; }
+#b3Pick button.poor i { color: #ff8a7a; }
+
 #b3Tools { display: flex; gap: 6px; padding: 8px 10px; }
 #b3Tools button {
 	flex: 1; min-height: 52px; border: none; border-radius: 9px;
